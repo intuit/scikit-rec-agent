@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/ssankararam/Shankar/Personal/RecSys/**)",
+      "Bash(git ls-remote *)",
+      "Bash(git add *)"
+    ],
+    "additionalDirectories": [
+      "/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec"
+    ]
+  }
+}

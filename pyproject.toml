@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scikit-rec-agent"
+dynamic = ["version"]
+description = "Conversational AI agent that drives scikit-rec via tool use"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "mypy>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/intuit/scikit-rec-agent"
+Repository = "https://github.com/intuit/scikit-rec-agent"
+Issues = "https://github.com/intuit/scikit-rec-agent/issues"
+
+[tool.setuptools_scm]
+
+[tool.setuptools.packages.find]
+include = ["scikit_rec_agent*"]
+
+# --- ruff (lint + format) ---
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]  # pycodestyle errors, pyflakes, isort
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --- mypy ---
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+
+# --- pytest ---
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+# --- coverage ---
+[tool.coverage.run]
+source = ["scikit_rec_agent"]

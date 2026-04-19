@@ -35,6 +35,7 @@ for event in agent.chat_turn("I have click data at /data/interactions.csv — he
 See [`examples/`](./examples/) for:
 - `custom_tool.py` — register a user-defined tool
 - `custom_prompt.py` — extend or replace the system prompt
+- `custom_llm.py` — plug in your company's internal LLM via the `BaseLLM` protocol
 - `custom_frontend.py` — drive the agent from Jupyter / Slack / web
 - `movielens_session.md` — annotated end-to-end transcript
 

@@ -150,6 +150,13 @@ def _split_data(
         bundle.test_interactions = None
         bundle.source_paths.pop("test_interactions", None)
 
+    # Validation data changed — any model trained/evaluated against this
+    # bundle now has a stale score cache. Reset so the next evaluate_model
+    # re-scores automatically without the user needing to pass refresh_scores.
+    for handle in session.trained_models.values():
+        if (handle.datasets_used or {}).get("bundle_id") == bundle_id:
+            handle.score_cache_populated = False
+
     return ok(
         {
             "bundle_id": bundle_id,

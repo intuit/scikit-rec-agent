@@ -422,7 +422,7 @@ Both shapes are passed back as the tool result. The LLM reads the `message` fiel
   "input_schema": {
     "type": "object",
     "properties": {
-      "bundle_name": {"type": "string"},
+      "bundle_id": {"type": "string"},
       "interactions_path": {"type": "string"},
       "users_path": {"type": "string"},
       "items_path": {"type": "string"},
@@ -435,7 +435,7 @@ Both shapes are passed back as the tool result. The LLM reads the `message` fiel
         "description": "Optional pre-written YAML schema paths keyed by file_type"
       }
     },
-    "required": ["bundle_name", "interactions_path"]
+    "required": ["bundle_id", "interactions_path"]
   }
 }
 ```

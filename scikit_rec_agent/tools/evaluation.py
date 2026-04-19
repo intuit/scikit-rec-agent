@@ -41,14 +41,18 @@ def _build_score_items_kwargs(session, handle) -> dict[str, pd.DataFrame]:
     return kwargs
 
 
-def _build_eval_kwargs_from_validation(
-    session, handle, user_col: str = "USER_ID", item_col: str = "ITEM_ID", outcome_col: str = "OUTCOME"
-) -> dict[str, Any]:
+def _build_eval_kwargs_from_validation(session, handle) -> dict[str, Any]:
     """For the 'simple' evaluator on implicit-feedback data, derive logged_items
     / logged_rewards from the bundle's validation interactions. Returns {} if
     validation data isn't available — the evaluator will raise with a clear
     message in that case.
+
+    Assumes scikit-rec canonical column names (USER_ID, ITEM_ID, OUTCOME).
+    `source_paths` always points at the post-rename CSV (see create_datasets
+    / split_data), so renamed data still lines up here.
     """
+    from skrec.constants import ITEM_ID_NAME, LABEL_NAME, USER_ID_NAME
+
     bundle_id = (handle.datasets_used or {}).get("bundle_id")
     bundle = session.loaded_datasets.get(bundle_id) if bundle_id else None
     if bundle is None:
@@ -57,18 +61,18 @@ def _build_eval_kwargs_from_validation(
     if not valid_path:
         return {}
     df = _read(valid_path)
-    if df.empty or user_col not in df.columns:
+    if df.empty or USER_ID_NAME not in df.columns:
         return {}
-    grouped = df.groupby(user_col).agg({item_col: list, outcome_col: list}).reset_index()
+    grouped = df.groupby(USER_ID_NAME).agg({ITEM_ID_NAME: list, LABEL_NAME: list}).reset_index()
     if grouped.empty:
         return {}
-    max_len = int(grouped[item_col].apply(len).max())
+    max_len = int(grouped[ITEM_ID_NAME].apply(len).max())
     items = np.array(
-        [row + [""] * (max_len - len(row)) for row in grouped[item_col]],
+        [row + [""] * (max_len - len(row)) for row in grouped[ITEM_ID_NAME]],
         dtype=object,
     )
     rewards = np.array(
-        [row + [0.0] * (max_len - len(row)) for row in grouped[outcome_col]],
+        [row + [0.0] * (max_len - len(row)) for row in grouped[LABEL_NAME]],
         dtype=float,
     )
     return {"logged_items": items, "logged_rewards": rewards}
@@ -108,10 +112,16 @@ def _evaluate_model(
     # for this model (or when the caller explicitly asks to refresh). The
     # recommender's evaluation_session caches recommendation scores; passing
     # score_items_kwargs every time re-scores from scratch and defeats the
-    # cache. Pass refresh_scores=True after you've changed the bundle's
-    # validation data or re-trained the model on new data.
+    # cache. split_data automatically resets the flag for affected handles
+    # so the next call re-scores against fresh validation data. Pass
+    # refresh_scores=True to force a re-score for other reasons.
     should_rescore = refresh_scores or not handle.score_cache_populated
     score_items_kwargs = _build_score_items_kwargs(session, handle) if should_rescore else None
+    # _build_score_items_kwargs can return {} when the source bundle was
+    # evicted (e.g., after load_model). Normalize to None so scikit-rec
+    # uses its cache rather than re-scoring with empty inputs.
+    if not score_items_kwargs:
+        score_items_kwargs = None
 
     effective_eval_kwargs: dict[str, Any] = dict(eval_kwargs or {})
     if not effective_eval_kwargs and evaluator_type == "simple":
@@ -138,7 +148,7 @@ def _evaluate_model(
             key = f"{metric_name}@{k}"
             handle.metrics[key] = float(value)
             results.append({"metric": metric_name, "k": int(k), "value": float(value)})
-    if score_items_kwargs:
+    if score_items_kwargs is not None:
         handle.score_cache_populated = True
 
     return ok({"model_id": model_id, "evaluator_type": evaluator_type, "results": results})

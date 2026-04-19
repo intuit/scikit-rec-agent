@@ -66,7 +66,7 @@ Train all three?
 **Agent:**
 
 ```
-[tool_call] create_datasets(bundle_name="movielens", interactions_path="...",
+[tool_call] create_datasets(bundle_id="movielens", interactions_path="...",
     users_path="...", items_path="...",
     column_mapping={"userid": "USER_ID", "itemid": "ITEM_ID", "clicked": "OUTCOME"})
 [tool_call] split_data(bundle_id="movielens", strategy="temporal",

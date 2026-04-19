@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
@@ -97,11 +99,21 @@ def test_compare_with_no_models_errors(session):
 
 
 def test_evaluate_reuses_score_cache_across_calls(trained_model, session):
-    # Regression: the first evaluate_model pass must populate the recommender's
-    # score cache so subsequent invocations can skip re-scoring. Verify the
-    # score_cache_populated flag flips and stays.
+    # Regression: the first evaluate_model pass populates the recommender's
+    # score cache; the second call must SKIP passing score_items_kwargs so
+    # scikit-rec's cache is honored instead of re-scoring. Verified by
+    # spying on recommender.evaluate.
     handle = session.trained_models[trained_model]
     assert handle.score_cache_populated is False
+
+    real_evaluate = handle.recommender.evaluate
+    seen_kwargs: list[dict[str, Any] | None] = []
+
+    def _spy(**kw):
+        seen_kwargs.append(kw.get("score_items_kwargs"))
+        return real_evaluate(**kw)
+
+    handle.recommender.evaluate = _spy
 
     first = TOOL_EVALUATE_MODEL.fn(
         model_id=trained_model,
@@ -112,11 +124,9 @@ def test_evaluate_reuses_score_cache_across_calls(trained_model, session):
     )
     assert first["status"] == "ok"
     assert handle.score_cache_populated is True
+    # First evaluate(): score_items_kwargs present (non-None dict).
+    assert seen_kwargs[0] is not None
 
-    # Second call should succeed without passing score_items_kwargs (flag
-    # already set). If rescoring were still happening, the recommender's own
-    # invariants would still pass — but we've at least asserted the agent's
-    # behavior hasn't regressed.
     second = TOOL_EVALUATE_MODEL.fn(
         model_id=trained_model,
         evaluator_type="simple",
@@ -125,4 +135,5 @@ def test_evaluate_reuses_score_cache_across_calls(trained_model, session):
         session=session,
     )
     assert second["status"] == "ok"
-    assert handle.score_cache_populated is True
+    # Second evaluate(): score_items_kwargs is None — cache reused.
+    assert seen_kwargs[1] is None

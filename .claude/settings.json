@@ -30,7 +30,12 @@
       "Bash(./.venv/bin/pip install *)",
       "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/python -c \"import skrec; print\\(skrec.__file__\\); print\\(skrec.__version__ if hasattr\\(skrec, '__version__'\\) else 'no ver'\\)\")",
       "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/pytest /Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/tests/ -x --no-header)",
-      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/python -c \"import anthropic; print\\(anthropic.__version__\\)\")"
+      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/python -c \"import anthropic; print\\(anthropic.__version__\\)\")",
+      "Bash(python -c \"import scikit_rec_agent; print\\(scikit_rec_agent.__file__\\)\")",
+      "Bash(pip show *)",
+      "Bash(python3 -c \"import scikit_rec_agent; print\\(scikit_rec_agent.__file__\\)\")",
+      "Bash(pip3 show *)",
+      "Bash(python3 -c \"import scikit_rec_agent\")"
     ],
     "additionalDirectories": [
       "/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec"

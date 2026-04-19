@@ -74,7 +74,27 @@ class AnthropicAdapter:
         current_tool: dict[str, Any] | None = None
         tool_input_buffer = ""
         stop_reason: str | None = None
-        saw_message_stop = False
+        saw_done = False
+
+        def _flush_tool() -> LLMStreamEvent | None:
+            nonlocal current_tool, tool_input_buffer
+            if current_tool is None:
+                return None
+            try:
+                arguments = json.loads(tool_input_buffer) if tool_input_buffer else {}
+            except json.JSONDecodeError:
+                arguments = {}
+            evt = LLMStreamEvent(
+                type="tool_call",
+                tool_call=ToolCall(
+                    id=current_tool["id"],
+                    name=current_tool["name"],
+                    arguments=arguments,
+                ),
+            )
+            current_tool = None
+            tool_input_buffer = ""
+            return evt
 
         try:
             for event in stream:
@@ -92,46 +112,27 @@ class AnthropicAdapter:
                     elif dtype == "input_json_delta":
                         tool_input_buffer += delta.partial_json
                 elif etype == "content_block_stop":
-                    if current_tool is not None:
-                        try:
-                            arguments = json.loads(tool_input_buffer) if tool_input_buffer else {}
-                        except json.JSONDecodeError:
-                            arguments = {}
-                        yield LLMStreamEvent(
-                            type="tool_call",
-                            tool_call=ToolCall(
-                                id=current_tool["id"],
-                                name=current_tool["name"],
-                                arguments=arguments,
-                            ),
-                        )
-                        current_tool = None
-                        tool_input_buffer = ""
+                    flushed = _flush_tool()
+                    if flushed is not None:
+                        yield flushed
                 elif etype == "message_delta":
                     delta_stop = getattr(event.delta, "stop_reason", None)
                     if delta_stop:
                         stop_reason = delta_stop
                 elif etype == "message_stop":
-                    saw_message_stop = True
+                    # Flush any in-flight tool BEFORE emitting done so
+                    # consumers that terminate on done don't miss the call.
+                    flushed = _flush_tool()
+                    if flushed is not None:
+                        yield flushed
+                    saw_done = True
                     yield LLMStreamEvent(type="done", stop_reason=stop_reason or "end_turn")
         finally:
-            # Stream may end without content_block_stop (network truncation,
-            # API timeout, cancellation mid tool_use). Flush whatever's in
-            # flight so the agent doesn't silently lose the tool call.
-            if current_tool is not None:
-                try:
-                    arguments = json.loads(tool_input_buffer) if tool_input_buffer else {}
-                except json.JSONDecodeError:
-                    arguments = {}
-                yield LLMStreamEvent(
-                    type="tool_call",
-                    tool_call=ToolCall(
-                        id=current_tool["id"],
-                        name=current_tool["name"],
-                        arguments=arguments,
-                    ),
-                )
-            if not saw_message_stop:
-                # Never got message_stop — synthesize a done event so the
-                # agent loop always terminates cleanly.
+            # Stream may end without message_stop / content_block_stop
+            # (network truncation, API timeout, cancellation mid tool_use).
+            # Flush whatever's in flight so nothing is silently lost.
+            flushed = _flush_tool()
+            if flushed is not None:
+                yield flushed
+            if not saw_done:
                 yield LLMStreamEvent(type="done", stop_reason=stop_reason or "incomplete")

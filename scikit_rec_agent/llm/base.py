@@ -8,7 +8,7 @@ chat_stream() satisfies the contract.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Protocol
+from typing import Any, Iterator, Protocol, runtime_checkable
 
 
 @dataclass
@@ -33,6 +33,7 @@ class LLMStreamEvent:
     stop_reason: str | None = None
 
 
+@runtime_checkable
 class BaseLLM(Protocol):
     """Minimal LLM interface required by the Agent.
 

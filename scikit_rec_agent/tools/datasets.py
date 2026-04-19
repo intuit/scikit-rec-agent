@@ -115,12 +115,16 @@ def _create_datasets(
     schemas = schemas or {}
     tmp_dir = tempfile.mkdtemp(prefix=f"skragent_{bundle_id}_")
     schema_paths: dict[str, str] = {}
-    source_paths: dict[str, str] = {"interactions": interactions_path}
+    # source_paths intentionally tracks the POST-rename CSV that the Dataset
+    # objects actually read from. Downstream tools (evaluate_model, HPO) read
+    # these back as DataFrames and expect canonical scikit-rec column names.
+    source_paths: dict[str, str] = {}
 
     try:
         inter_path, inter_df = _prepare_source(interactions_path, column_mapping, tmp_dir)
         inter_schema = _write_schema(inter_df, "interactions", tmp_dir, schemas.get("interactions"))
         schema_paths["interactions"] = inter_schema
+        source_paths["interactions"] = inter_path
         interactions_ds = InteractionsDataset(data_location=inter_path, client_schema_path=inter_schema)
 
         users_ds = None
@@ -130,7 +134,7 @@ def _create_datasets(
             u_path, u_df = _prepare_source(users_path, column_mapping, tmp_dir)
             u_schema = _write_schema(u_df, "users", tmp_dir, schemas.get("users"))
             schema_paths["users"] = u_schema
-            source_paths["users"] = users_path
+            source_paths["users"] = u_path
             users_ds = UsersDataset(data_location=u_path, client_schema_path=u_schema)
 
         items_ds = None
@@ -140,7 +144,7 @@ def _create_datasets(
             i_path, i_df = _prepare_source(items_path, column_mapping, tmp_dir)
             i_schema = _write_schema(i_df, "items", tmp_dir, schemas.get("items"))
             schema_paths["items"] = i_schema
-            source_paths["items"] = items_path
+            source_paths["items"] = i_path
             items_ds = ItemsDataset(data_location=i_path, client_schema_path=i_schema)
 
         valid_ds = None
@@ -148,7 +152,7 @@ def _create_datasets(
             if not os.path.exists(valid_interactions_path):
                 return err("FileNotFoundError", f"valid_interactions_path not found: {valid_interactions_path}")
             v_path, _ = _prepare_source(valid_interactions_path, column_mapping, tmp_dir)
-            source_paths["valid_interactions"] = valid_interactions_path
+            source_paths["valid_interactions"] = v_path
             valid_ds = InteractionsDataset(data_location=v_path, client_schema_path=inter_schema)
 
         test_ds = None
@@ -156,7 +160,7 @@ def _create_datasets(
             if not os.path.exists(test_interactions_path):
                 return err("FileNotFoundError", f"test_interactions_path not found: {test_interactions_path}")
             t_path, _ = _prepare_source(test_interactions_path, column_mapping, tmp_dir)
-            source_paths["test_interactions"] = test_interactions_path
+            source_paths["test_interactions"] = t_path
             test_ds = InteractionsDataset(data_location=t_path, client_schema_path=inter_schema)
     except Exception as e:
         return err(type(e).__name__, str(e))

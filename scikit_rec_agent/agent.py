@@ -48,6 +48,15 @@ class Agent:
     ):
         from scikit_rec_agent.prompts import DEFAULT_SYSTEM_PROMPT
 
+        # Catch adapters that forgot a method or misspelled one at
+        # construction time rather than surfacing AttributeError mid-turn.
+        missing = [m for m in ("chat", "chat_stream") if not callable(getattr(llm, m, None))]
+        if missing:
+            raise TypeError(
+                f"llm argument does not implement BaseLLM: missing {missing}. "
+                "See scikit_rec_agent.llm.base.BaseLLM for the required interface."
+            )
+
         self.llm = llm
         self.tools = tools if tools is not None else get_default_tools()
         self.system_prompt = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT

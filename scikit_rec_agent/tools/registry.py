@@ -27,7 +27,10 @@ REGISTRY_ROOT = Path.home() / ".scikit-rec" / "registry"
 # via `../` traversal or absolute paths. Both cases would otherwise bypass
 # REGISTRY_ROOT entirely, and load_model's pickle.load would become an RCE
 # vector against any .pkl the agent can be convinced to point at.
-_VALID_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+# Disallowed: leading dot, trailing dot, consecutive dots, slashes, anything
+# outside [A-Za-z0-9_.-]. Names like "foo.pkl" are also rejected to avoid
+# confusing filesystem artifacts (registry entries are directories, not files).
+_VALID_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$")
 
 
 def _validate_model_name(model_name: str) -> str | None:
@@ -36,8 +39,13 @@ def _validate_model_name(model_name: str) -> str | None:
         return "model_name must be a non-empty string."
     if model_name in {".", ".."}:
         return "model_name must not be '.' or '..'."
+    if model_name.lower().endswith((".pkl", ".pickle", ".json")):
+        return f"model_name must not have a file extension ({model_name}); it names a registry directory, not a file."
     if not _VALID_MODEL_NAME.match(model_name):
-        return "model_name must match [A-Za-z0-9][A-Za-z0-9_.-]* (no slashes, no leading dots)."
+        return (
+            "model_name must match [A-Za-z0-9][A-Za-z0-9_.-]* with no "
+            "leading, trailing, or consecutive dots and no slashes."
+        )
     return None
 
 

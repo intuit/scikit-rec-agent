@@ -65,38 +65,51 @@ class OpenAIAdapter:
         tool_buffers: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
 
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            delta = choice.delta
-            if getattr(delta, "content", None):
-                yield LLMStreamEvent(type="text_delta", text=delta.content)
-            for tc_delta in getattr(delta, "tool_calls", None) or []:
-                idx = tc_delta.index
-                buf = tool_buffers.setdefault(idx, {"id": None, "name": None, "args": ""})
-                if tc_delta.id:
-                    buf["id"] = tc_delta.id
-                fn = getattr(tc_delta, "function", None)
-                if fn is not None:
-                    if getattr(fn, "name", None):
-                        buf["name"] = fn.name
-                    if getattr(fn, "arguments", None):
-                        buf["args"] += fn.arguments
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-        for idx in sorted(tool_buffers):
-            buf = tool_buffers[idx]
-            try:
-                arguments = json.loads(buf["args"]) if buf["args"] else {}
-            except json.JSONDecodeError:
-                arguments = {}
+        try:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if getattr(delta, "content", None):
+                    yield LLMStreamEvent(type="text_delta", text=delta.content)
+                for tc_delta in getattr(delta, "tool_calls", None) or []:
+                    idx = tc_delta.index
+                    buf = tool_buffers.setdefault(idx, {"id": None, "name": None, "args": ""})
+                    if tc_delta.id:
+                        buf["id"] = tc_delta.id
+                    fn = getattr(tc_delta, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            buf["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            buf["args"] += fn.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+        finally:
+            # Match the Anthropic adapter: flush buffered tool_calls and
+            # synthesize a done event even when the stream errors out or
+            # ends prematurely, so the agent loop never silently drops the
+            # model's intended action.
+            for idx in sorted(tool_buffers):
+                buf = tool_buffers[idx]
+                # Skip severely-truncated entries with neither an id nor a
+                # name — emitting a ToolCall with id=None would just produce
+                # a downstream API error on the next turn.
+                if not buf["id"] or not buf["name"]:
+                    continue
+                try:
+                    arguments = json.loads(buf["args"]) if buf["args"] else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+                yield LLMStreamEvent(
+                    type="tool_call",
+                    tool_call=ToolCall(id=buf["id"], name=buf["name"], arguments=arguments),
+                )
             yield LLMStreamEvent(
-                type="tool_call",
-                tool_call=ToolCall(id=buf["id"], name=buf["name"], arguments=arguments),
+                type="done",
+                stop_reason=_translate_finish_reason(finish_reason) if finish_reason else "incomplete",
             )
-        yield LLMStreamEvent(type="done", stop_reason=_translate_finish_reason(finish_reason))
 
 
 def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -31,3 +31,9 @@ coverage.xml
 # Editors
 .vscode/
 .idea/
+
+# Private, local-only launchers (company-internal LLM auth, etc.)
+private/
+
+# Claude Code (per-user assistant config — not project-relevant for OSS)
+.claude/

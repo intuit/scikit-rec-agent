@@ -160,4 +160,14 @@ need parameters (uplift requires `control_item_id`, gcsl requires
 
 When emitting candidate configs in text, write valid JSON-compatible dicts so
 the user can paste them into a follow-up request if they want.
+
+# Python code examples
+
+When showing Python code, prefer the `skrec`, `scikit_rec`, and
+`scikit_rec_agent` namespaces — the factory, tool loop, and capability
+matrix above are the authoritative contracts. If the user's request
+genuinely requires external libraries (pandas, sklearn, torch, requests,
+etc.), state that the signatures are unverified against the user's
+installed versions and keep the snippet minimal. If the request can be
+answered with a tool call instead, show the tool call, not Python.
 """

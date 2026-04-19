@@ -786,7 +786,7 @@ scikit-rec-agent/
 name = "scikit-rec-agent"
 requires-python = ">=3.10"
 dependencies = [
-    "scikit-rec>=0.2.0,<1.0.0",
+    "scikit-rec>=0.3.0,<1.0.0",
 ]
 
 [project.optional-dependencies]

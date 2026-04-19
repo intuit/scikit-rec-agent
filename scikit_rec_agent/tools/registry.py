@@ -22,37 +22,6 @@ from scikit_rec_agent.tools import Tool, err, ok
 REGISTRY_ROOT = Path.home() / ".scikit-rec" / "registry"
 
 
-def _reconstruct_scorer(cls):
-    """Module-level reconstructor for unpickling UniversalScorer subclasses.
-    Must be module-level so pickle can reference it by qualified name."""
-    return object.__new__(cls)
-
-
-def _scorer_reduce(self):
-    return (_reconstruct_scorer, (type(self),), self.__dict__)
-
-
-def _patch_unpicklable_scorers() -> None:
-    """scikit-rec's UniversalScorer defines a factory-style __new__ that takes
-    `estimator` as a required positional arg. pickle's default protocol calls
-    cls.__new__(cls) without args on load, so unpickling blows up. Attach a
-    __reduce__ that bypasses the factory on reconstruction.
-
-    Tracked for upstream fix in scikit-rec; remove when the library gains
-    first-class pickle support for scorers.
-    """
-    try:
-        from skrec.scorer.universal import UniversalScorer
-    except Exception:
-        return
-    if "__reduce__" in UniversalScorer.__dict__:
-        return
-    UniversalScorer.__reduce__ = _scorer_reduce
-
-
-_patch_unpicklable_scorers()
-
-
 def _model_dir(model_name: str) -> Path:
     return REGISTRY_ROOT / model_name
 

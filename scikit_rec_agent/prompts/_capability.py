@@ -1,98 +1,65 @@
 """Runtime-derived capability matrix for the system prompt.
 
-Reaches into scikit-rec factory private maps. If scikit-rec exposes a public
-capability-matrix accessor later (tracked as a follow-up), swap this over.
+Consumes scikit-rec's public `capability_matrix()` accessor and public enum
+tuples (added in scikit-rec 0.3.0). When scikit-rec adds a new recommender /
+scorer / estimator / model_type, it flows into the prompt automatically on
+the next agent run — no manual sync required.
 """
 
 from __future__ import annotations
 
-# Top-level enums are hardcoded (the factory enforces them via if/elif chains,
-# not enum maps). Tests in tests/test_prompts.py assert the prompt mentions
-# every value so drift gets caught in CI.
-RECOMMENDER_TYPES = (
-    "ranking",
-    "bandits",
-    "sequential",
-    "hierarchical_sequential",
-    "uplift",
-    "gcsl",
+from skrec.evaluator.datatypes import RecommenderEvaluatorType
+from skrec.metrics.datatypes import RecommenderMetricType
+from skrec.orchestrator import (
+    ESTIMATOR_TYPES,
+    RECOMMENDER_TYPES,
+    SCORER_TYPES,
 )
-
-SCORER_TYPES = (
-    "universal",
-    "independent",
-    "multiclass",
-    "multioutput",
-    "sequential",
-    "hierarchical",
-)
-
-ESTIMATOR_TYPES = ("tabular", "embedding", "sequential")
-
-EVALUATOR_TYPES = (
-    "simple",
-    "replay_match",
-    "IPS",
-    "DR",
-    "direct_method",
-    "SNIPS",
-    "policy_weighted",
-)
-
-METRIC_TYPES = (
-    "NDCG_at_k",
-    "MAP_at_k",
-    "MRR_at_k",
-    "precision_at_k",
-    "recall_at_k",
-    "average_reward_at_k",
-    "roc_auc",
-    "pr_auc",
-    "expected_reward",
+from skrec.orchestrator import (
+    capability_matrix as _factory_capability_matrix,
 )
 
 
-def _get_from_factory(name: str) -> list[str]:
-    """Read a private map from skrec.orchestrator.factory. Returns empty list
-    if the import fails, so the capability matrix degrades gracefully if
-    scikit-rec restructures.
-    """
-    try:
-        from skrec.orchestrator import factory
-
-        val = getattr(factory, name, None)
-        if val is None:
-            return []
-        return list(val.keys())
-    except Exception:
-        return []
+def _evaluator_types() -> tuple[str, ...]:
+    return tuple(e.value for e in RecommenderEvaluatorType)
 
 
-def embedding_model_types() -> list[str]:
-    return _get_from_factory("_EMBEDDING_ESTIMATOR_MAP")
+def _metric_types() -> tuple[str, ...]:
+    return tuple(m.value for m in RecommenderMetricType)
 
 
-def sequential_model_types() -> list[str]:
-    return _get_from_factory("_SEQUENTIAL_ESTIMATOR_MAP")
+# Back-compat re-exports. Tests in tests/test_prompts.py read these names;
+# keep them pointed at the public scikit-rec source.
+EVALUATOR_TYPES: tuple[str, ...] = _evaluator_types()
+METRIC_TYPES: tuple[str, ...] = _metric_types()
 
 
-def inference_method_types() -> list[str]:
-    return _get_from_factory("_INFERENCE_METHOD_MAP")
+def embedding_model_types() -> tuple[str, ...]:
+    return _factory_capability_matrix()["embedding_model_types"]
 
 
-def retriever_types() -> list[str]:
-    return _get_from_factory("_RETRIEVER_MAP")
+def sequential_model_types() -> tuple[str, ...]:
+    return _factory_capability_matrix()["sequential_model_types"]
+
+
+def inference_method_types() -> tuple[str, ...]:
+    return _factory_capability_matrix()["inference_method_types"]
+
+
+def retriever_types() -> tuple[str, ...]:
+    return _factory_capability_matrix()["retriever_types"]
 
 
 def capability_matrix() -> str:
+    cm = _factory_capability_matrix()
     lines = [
         f"- recommender_type ∈ {{{', '.join(RECOMMENDER_TYPES)}}}",
         f"- scorer_type ∈ {{{', '.join(SCORER_TYPES)}}}",
         f"- estimator_type ∈ {{{', '.join(ESTIMATOR_TYPES)}}}",
-        f"- embedding model_type ∈ {{{', '.join(embedding_model_types())}}}",
-        f"- sequential model_type ∈ {{{', '.join(sequential_model_types())}}}",
-        f"- inference_method.type ∈ {{{', '.join(inference_method_types())}}}",
-        f"- retriever.type ∈ {{{', '.join(retriever_types())}}}",
+        f"- embedding model_type ∈ {{{', '.join(cm['embedding_model_types'])}}}",
+        f"- sequential model_type ∈ {{{', '.join(cm['sequential_model_types'])}}}",
+        f"- inference_method.type ∈ {{{', '.join(cm['inference_method_types'])}}}",
+        f"- retriever.type ∈ {{{', '.join(cm['retriever_types'])}}}",
         f"- evaluator_type ∈ {{{', '.join(EVALUATOR_TYPES)}}}",
         f"- metric ∈ {{{', '.join(METRIC_TYPES)}}}",
     ]

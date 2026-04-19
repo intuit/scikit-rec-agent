@@ -16,7 +16,7 @@ This document is the authoritative spec for the implementation. It reflects the 
 | Tool registry | **Pluggable at `Agent()` construction** | 10 default tools ship with the library; users extend or replace via `tools=...`. |
 | Interface | **CLI** for v1 | `scikit-rec-agent chat`. Jupyter/web layered on top of `Agent` later. |
 | Model registry | **Local filesystem** | `~/.scikit-rec/registry/` — JSON metadata + pickle. |
-| Tool scope | **10 tools, everything in v1** | No v1.1 tier. If it's worth shipping, it ships now. |
+| Tool scope | **11 tools, everything in v1** | No v1.1 tier. If it's worth shipping, it ships now. |
 | Recommender scope | **Full scikit-rec capability matrix** | All 6 recommenders × 6 scorers × 3 estimator planes. Driven end-to-end via `create_recommender_pipeline`. |
 | `suggest_pipelines` | **In-prompt reasoning, not a tool** | The LLM emits candidate `RecommenderConfig` dicts as text; `train_model` validates via the factory. |
 | Config validation | **Delegated to scikit-rec factory** | Agent does not re-implement enum checks. Bad configs fail at `train_model` with the factory's error message surfaced to the LLM. |
@@ -339,17 +339,18 @@ Tool functions receive the `Session` as a keyword arg so user-defined tools can 
 
 ---
 
-## Agent Tools (v1 — 10 tools)
+## Agent Tools (v1 — 11 tools)
 
 | Tool | Purpose | Wraps |
 |---|---|---|
 | `profile_data` | Load CSV/parquet; report shape, dtypes, cardinality, sparsity, temporal range, target type | pandas + heuristics |
 | `validate_data` | Schema-compliance check against scikit-rec required schemas. Returns violations + auto-fix suggestions. | Compare against `InteractionsDataset.REQUIRED_SCHEMA_PATH_TRAINING` etc. |
 | `create_datasets` | Build `InteractionsDataset` / `UsersDataset` / `ItemsDataset` handles. Auto-generate YAML schema to tmp dir if not provided. Supports `column_mapping` to rename user columns → scikit-rec names. | `DatasetSchema.create` + dataset constructors |
-| `train_model` | Train a recommender pipeline from a `RecommenderConfig`. Creates datasets internally if called with paths; uses pre-built datasets if called with dataset handles from `create_datasets`. | `create_recommender_pipeline` + `.train()` |
+| `split_data` | Split a bundle's interactions into train/valid/test using a recsys-appropriate strategy (temporal, leave_last_n_per_user, random_split_per_user, leave_n_users_out, random_split). Updates the bundle in place. | `skrec.split` |
+| `train_model` | Train a recommender pipeline from a `RecommenderConfig`. Creates datasets internally if called with paths; uses pre-built datasets if called with dataset handles from `create_datasets`. Uses the bundle's validation interactions (from split_data) automatically. | `create_recommender_pipeline` + `.train()` |
 | `evaluate_model` | Run evaluation: evaluator type + metrics + multiple k values. Supports all 7 evaluator types. | `BaseRecommender.evaluate()` |
 | `compare_models` | Tabulate metrics across trained models. Markdown table sorted by primary metric. | Session state lookup |
-| `run_hpo` | Optuna-based hyperparameter optimization. Returns best config + trial results. | `HyperparameterOptimizer.run_optimization()` |
+| `run_hpo` | Optuna-based hyperparameter optimization. Requires a bundle with validation interactions (use `split_data` first). Returns best config + trial results, optionally retrains the best config and registers it. | `HyperparameterOptimizer.run_optimization()` |
 | `save_model` | Persist model + config + metrics to local registry | pickle + JSON metadata |
 | `list_models` | List models in the local registry (not just session) with metadata. | Filesystem scan of `~/.scikit-rec/registry/` |
 | `load_model` | Load a registered model into the current session. | pickle + session state mutation |
@@ -437,14 +438,41 @@ Both shapes are passed back as the tool result. The LLM reads the `message` fiel
   }
 }
 ```
-**Returns:** `bundle_id`, paths to generated schema files (so user can inspect / version them), summary of the three datasets.
+**Returns:** `bundle_id`, paths to generated schema files (so user can inspect / version them), summary of the three datasets. Also supports optional `valid_interactions_path` and `test_interactions_path` for users who pre-split their data.
+
+### split_data
+
+```json
+{
+  "name": "split_data",
+  "description": "Split a dataset bundle's interactions into train/validation/test using a recommender-systems-appropriate strategy. Updates the bundle in place: the bundle's interactions becomes the training split, and valid_interactions / test_interactions are populated. Strategies: temporal (chronological, production-realistic default); leave_last_n_per_user (sequential-model standard); random_split_per_user (per-user random holdout, preserves all users in train); leave_n_users_out (full user holdout — only honest cold-start eval); random_split (rarely appropriate — sanity checks only).",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "bundle_id": {"type": "string"},
+      "strategy": {"type": "string", "enum": ["temporal", "leave_last_n_per_user", "random_split_per_user", "leave_n_users_out", "random_split"]},
+      "valid_fraction": {"type": "number"},
+      "test_fraction": {"type": "number", "default": 0.0},
+      "n_valid": {"type": "integer"},
+      "n_test": {"type": "integer", "default": 0},
+      "n_valid_users": {"type": "integer"},
+      "n_test_users": {"type": "integer", "default": 0},
+      "user_col": {"type": "string", "default": "USER_ID"},
+      "timestamp_col": {"type": "string", "default": "TIMESTAMP"},
+      "random_state": {"type": "integer"}
+    },
+    "required": ["bundle_id", "strategy"]
+  }
+}
+```
+**Returns:** `bundle_id`, `strategy`, `train_rows`, `valid_rows`, `test_rows`, `paths` (to the temp CSVs), and `info` (strategy-specific diagnostics: date ranges for temporal, dropped users for leave_last_n_per_user, etc.).
 
 ### train_model
 
 ```json
 {
   "name": "train_model",
-  "description": "Train a recommender pipeline from a RecommenderConfig. Supply either a dataset bundle_id from create_datasets, OR raw file paths with optional column_mapping (train_model will call create_datasets internally). Config is validated by scikit-rec's factory — bad configs raise with a specific error that you can use to correct and retry.",
+  "description": "Train a recommender pipeline from a RecommenderConfig. Supply either a dataset bundle_id from create_datasets, OR raw file paths with optional column_mapping (train_model will call create_datasets internally). If the bundle has validation interactions attached (from split_data), they are used automatically. Config is validated by scikit-rec's factory — bad configs raise with a specific error that you can use to correct and retry.",
   "input_schema": {
     "type": "object",
     "properties": {
@@ -457,8 +485,7 @@ Both shapes are passed back as the tool result. The LLM reads the `message` fiel
       "interactions_path": {"type": "string"},
       "users_path": {"type": "string"},
       "items_path": {"type": "string"},
-      "column_mapping": {"type": "object"},
-      "validation_split": {"type": "number", "description": "0-1 fraction held out. Default 0.2. Ignored if explicit validation datasets are in the bundle."}
+      "column_mapping": {"type": "object"}
     },
     "required": ["model_name", "config"]
   }
@@ -711,29 +738,28 @@ The default system prompt (lives in `src/scikit_rec_agent/prompts/system.py`) en
 scikit-rec-agent/
 ├── pyproject.toml
 ├── README.md
-├── src/
-│   └── scikit_rec_agent/
-│       ├── __init__.py             # Exports: Agent, BaseLLM, Tool, Session, DEFAULT_TOOLS, DEFAULT_SYSTEM_PROMPT
-│       ├── agent.py                # Agent loop: BaseLLM + tool dispatch + streaming
-│       ├── session.py              # Session + ModelHandle dataclasses
-│       ├── llm/
-│       │   ├── __init__.py         # Exports BaseLLM, LLMResponse, LLMStreamEvent, ToolCall
-│       │   ├── base.py             # Protocol + dataclasses
-│       │   ├── anthropic.py        # AnthropicAdapter
-│       │   └── openai.py           # OpenAIAdapter
-│       ├── tools/
-│       │   ├── __init__.py         # DEFAULT_TOOLS list; Tool dataclass
-│       │   ├── profiling.py        # profile_data, validate_data
-│       │   ├── datasets.py         # create_datasets (incl. auto-schema generation)
-│       │   ├── training.py         # train_model
-│       │   ├── evaluation.py       # evaluate_model, compare_models
-│       │   ├── hpo.py              # run_hpo
-│       │   └── registry.py         # save_model, list_models, load_model
-│       ├── prompts/
-│       │   ├── __init__.py
-│       │   ├── system.py           # DEFAULT_SYSTEM_PROMPT (built at import from factory enums)
-│       │   └── _capability.py      # Runtime-derived capability matrix → string
-│       └── cli.py                  # Entry point: scikit-rec-agent chat
+├── scikit_rec_agent/               # flat layout (matches scikit-rec)
+│   ├── __init__.py                 # Exports: Agent, BaseLLM, Tool, Session, DEFAULT_TOOLS, DEFAULT_SYSTEM_PROMPT
+│   ├── agent.py                    # Agent loop: BaseLLM + tool dispatch + streaming
+│   ├── session.py                  # Session + ModelHandle dataclasses
+│   ├── llm/
+│   │   ├── __init__.py             # Exports BaseLLM, LLMResponse, LLMStreamEvent, ToolCall
+│   │   ├── base.py                 # Protocol + dataclasses
+│   │   ├── anthropic.py            # AnthropicAdapter
+│   │   └── openai.py               # OpenAIAdapter
+│   ├── tools/
+│   │   ├── __init__.py             # DEFAULT_TOOLS list; Tool dataclass
+│   │   ├── profiling.py            # profile_data, validate_data
+│   │   ├── datasets.py             # create_datasets (incl. auto-schema generation)
+│   │   ├── training.py             # train_model
+│   │   ├── evaluation.py           # evaluate_model, compare_models
+│   │   ├── hpo.py                  # run_hpo
+│   │   └── registry.py             # save_model, list_models, load_model
+│   ├── prompts/
+│   │   ├── __init__.py
+│   │   ├── system.py               # DEFAULT_SYSTEM_PROMPT (built at import from factory enums)
+│   │   └── _capability.py          # Runtime-derived capability matrix → string
+│   └── cli.py                      # Entry point: scikit-rec-agent chat
 ├── tests/
 │   ├── fixtures/                   # Tiny CSVs + mocked LLM transcripts
 │   ├── test_profiling.py
@@ -760,7 +786,7 @@ scikit-rec-agent/
 name = "scikit-rec-agent"
 requires-python = ">=3.10"
 dependencies = [
-    "scikit-rec>=1.0.0",
+    "scikit-rec>=0.2.0,<1.0.0",
 ]
 
 [project.optional-dependencies]

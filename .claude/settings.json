@@ -3,7 +3,30 @@
     "allow": [
       "Read(//Users/ssankararam/Shankar/Personal/RecSys/**)",
       "Bash(git ls-remote *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git checkout *)",
+      "Read(//opt/homebrew/Cellar/python@3.12/3.12.12/bin/**)",
+      "Bash(/opt/homebrew/opt/python@3.12/bin/python3 --version)",
+      "Bash(/opt/homebrew/opt/python@3.12/bin/python3.12 --version)",
+      "Bash(/opt/homebrew/opt/python@3.12/bin/python3.12 -m venv /Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv)",
+      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/pip install *)",
+      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/python -c ' *)",
+      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/python -c \"from skrec.orchestrator.hpo import HyperparameterOptimizer; print\\('ok:', HyperparameterOptimizer.__module__\\)\")",
+      "Bash(./.venv/bin/pytest tests/test_agent_loop.py tests/llm/ -x)",
+      "Bash(./.venv/bin/pytest tests/test_agent_loop.py tests/llm/ tests/test_import.py -x)",
+      "Bash(./.venv/bin/pytest tests/tools/ -x)",
+      "Bash(./.venv/bin/python -c ' *)",
+      "Bash(./.venv/bin/pytest tests/tools/test_training.py tests/tools/test_evaluation.py tests/tools/test_registry.py tests/tools/test_hpo.py)",
+      "Bash(./.venv/bin/pytest tests/tools/test_evaluation.py::test_evaluate_records_metrics tests/tools/test_registry.py::test_save_list_load_roundtrip -v)",
+      "Bash(./.venv/bin/pytest tests/tools/test_evaluation.py::test_evaluate_records_metrics tests/tools/test_registry.py::test_save_list_load_roundtrip -v -s)",
+      "Bash(./.venv/bin/pytest tests/tools/)",
+      "Bash(./.venv/bin/pytest tests/tools/test_evaluation.py::test_evaluate_records_metrics -v -s)",
+      "Bash(./.venv/bin/pytest tests/)",
+      "Bash(./.venv/bin/ruff format *)",
+      "Bash(./.venv/bin/ruff check *)",
+      "Bash(./.venv/bin/pytest tests/ -q)"
     ],
     "additionalDirectories": [
       "/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec"

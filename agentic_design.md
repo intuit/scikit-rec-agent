@@ -13,7 +13,7 @@ This document is the authoritative spec for the implementation. It reflects the 
 | Distribution | **Single pip package** (`scikit-rec-agent`) | Installable library with CLI entry point. Examples live in `examples/`, no separate cookbook repo. |
 | LLM provider | **Bring-your-own** via `BaseLLM` protocol | Users pass any LLM that implements `chat()` + `chat_stream()`. Ship Anthropic + OpenAI adapters at launch. |
 | System prompt | **Swappable at `Agent()` construction** | Default prompt exported; users pass `system_prompt=...` to override or extend. |
-| Tool registry | **Pluggable at `Agent()` construction** | 10 default tools ship with the library; users extend or replace via `tools=...`. |
+| Tool registry | **Pluggable at `Agent()` construction** | 11 default tools ship with the library; users extend or replace via `tools=...`. |
 | Interface | **CLI** for v1 | `scikit-rec-agent chat`. Jupyter/web layered on top of `Agent` later. |
 | Model registry | **Local filesystem** | `~/.scikit-rec/registry/` — JSON metadata + pickle. |
 | Tool scope | **11 tools, everything in v1** | No v1.1 tier. If it's worth shipping, it ships now. |
@@ -317,7 +317,8 @@ agent = Agent(llm=llm, system_prompt=custom_prompt)
 
 ```python
 from scikit_rec_agent import Agent
-from scikit_rec_agent.tools import DEFAULT_TOOLS, Tool
+from scikit_rec_agent.tools import Tool
+from scikit_rec_agent import get_default_tools
 
 def fetch_from_snowflake(query: str, session: Session) -> dict:
     ...
@@ -328,7 +329,7 @@ custom_tool = Tool(
     fn=fetch_from_snowflake,
 )
 
-agent = Agent(llm=llm, tools=[*DEFAULT_TOOLS, custom_tool])
+agent = Agent(llm=llm, tools=[*get_default_tools(), custom_tool])
 ```
 
 Tool functions receive the `Session` as a keyword arg so user-defined tools can read and mutate the same state.
@@ -739,7 +740,7 @@ scikit-rec-agent/
 ├── pyproject.toml
 ├── README.md
 ├── scikit_rec_agent/               # flat layout (matches scikit-rec)
-│   ├── __init__.py                 # Exports: Agent, BaseLLM, Tool, Session, DEFAULT_TOOLS, DEFAULT_SYSTEM_PROMPT
+│   ├── __init__.py                 # Exports: Agent, BaseLLM, Tool, Session, get_default_tools, DEFAULT_SYSTEM_PROMPT
 │   ├── agent.py                    # Agent loop: BaseLLM + tool dispatch + streaming
 │   ├── session.py                  # Session + ModelHandle dataclasses
 │   ├── llm/
@@ -748,7 +749,7 @@ scikit-rec-agent/
 │   │   ├── anthropic.py            # AnthropicAdapter
 │   │   └── openai.py               # OpenAIAdapter
 │   ├── tools/
-│   │   ├── __init__.py             # DEFAULT_TOOLS list; Tool dataclass
+│   │   ├── __init__.py             # get_default_tools(); Tool dataclass
 │   │   ├── profiling.py            # profile_data, validate_data
 │   │   ├── datasets.py             # create_datasets (incl. auto-schema generation)
 │   │   ├── training.py             # train_model
@@ -813,7 +814,7 @@ All ML dependencies come transitively through `scikit-rec`.
 ## Build Plan
 
 1. **Day 1 — Skeleton**: `pyproject.toml`, `llm/{base,anthropic,openai}.py`, `session.py`, `agent.py` loop, mocked-LLM smoke test (one scripted `train_model` call end-to-end).
-2. **Days 2–4 — Tools**: all 10 tools against `create_recommender_pipeline` and `HyperparameterOptimizer`. Use `skrec.examples.datasets.sample_*` for fixtures.
+2. **Days 2–4 — Tools**: all 11 tools against `create_recommender_pipeline`, `skrec.split`, and `HyperparameterOptimizer`. Use `skrec.examples.datasets.sample_*` for fixtures.
 3. **Days 5–6 — System prompt + CLI**: build the capability matrix from factory enums at import time (derive, don't hardcode); CLI entry with streaming; single end-to-end transcript example.
 4. **Day 7 — Tests + polish**: per-tool tests, adapter tests with mocked API, end-to-end scripted-LLM integration test, README.
 

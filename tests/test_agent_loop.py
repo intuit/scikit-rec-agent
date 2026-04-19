@@ -142,3 +142,19 @@ def test_tool_schema_shape():
 def test_error_envelope_shape():
     e = err("X", "boom", hint="retry")
     assert e == {"status": "error", "error_type": "X", "message": "boom", "hint": "retry"}
+
+
+def test_agent_skips_empty_assistant_turn(session):
+    # Regression: if the LLM stream yields neither text nor a tool_call, the
+    # old loop appended {"role": "assistant", "content": []} which Anthropic
+    # rejects on the next invocation. The agent should skip the empty append
+    # and emit a 'done' with stop_reason='empty_response'.
+    llm = ScriptedLLM(responses=[{"text": "", "tool_calls": []}])
+    agent = Agent(llm=llm, tools=[], system_prompt="sys", session=session)
+
+    events = list(agent.chat_turn("hi"))
+
+    # Only the user message ends up in history; no empty assistant.
+    assert session.messages == [{"role": "user", "content": "hi"}]
+    done = [e for e in events if e.type == "done"]
+    assert done[-1].stop_reason == "empty_response"

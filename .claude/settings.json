@@ -26,7 +26,11 @@
       "Bash(./.venv/bin/pytest tests/)",
       "Bash(./.venv/bin/ruff format *)",
       "Bash(./.venv/bin/ruff check *)",
-      "Bash(./.venv/bin/pytest tests/ -q)"
+      "Bash(./.venv/bin/pytest tests/ -q)",
+      "Bash(./.venv/bin/pip install *)",
+      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/python -c \"import skrec; print\\(skrec.__file__\\); print\\(skrec.__version__ if hasattr\\(skrec, '__version__'\\) else 'no ver'\\)\")",
+      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/pytest /Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/tests/ -x --no-header)",
+      "Bash(/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec-agent/.venv/bin/python -c \"import anthropic; print\\(anthropic.__version__\\)\")"
     ],
     "additionalDirectories": [
       "/Users/ssankararam/Shankar/Personal/RecSys/scikit-rec"

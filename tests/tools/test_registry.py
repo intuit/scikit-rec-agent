@@ -22,7 +22,7 @@ _CONFIG = {
 
 def _train(binary_reward_paths, session, name="reg_test"):
     TOOL_CREATE_DATASETS.fn(
-        bundle_name="b",
+        bundle_id="b",
         interactions_path=binary_reward_paths["interactions"],
         users_path=binary_reward_paths["users"],
         items_path=binary_reward_paths["items"],

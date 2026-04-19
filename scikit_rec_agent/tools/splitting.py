@@ -139,12 +139,16 @@ def _split_data(
     bundle.valid_interactions = InteractionsDataset(data_location=valid_path, client_schema_path=inter_schema)
     bundle.source_paths["valid_interactions"] = valid_path
 
-    test_path = None
+    test_path: str | None = None
     if result.test is not None:
         test_path = os.path.join(tmp_dir, "test.csv")
         result.test.to_csv(test_path, index=False)
         bundle.test_interactions = InteractionsDataset(data_location=test_path, client_schema_path=inter_schema)
         bundle.source_paths["test_interactions"] = test_path
+    else:
+        # Overwrite rather than leave stale handles from a prior split/create.
+        bundle.test_interactions = None
+        bundle.source_paths.pop("test_interactions", None)
 
     return ok(
         {

@@ -74,40 +74,64 @@ class AnthropicAdapter:
         current_tool: dict[str, Any] | None = None
         tool_input_buffer = ""
         stop_reason: str | None = None
+        saw_message_stop = False
 
-        for event in stream:
-            etype = getattr(event, "type", None)
-            if etype == "content_block_start":
-                block = event.content_block
-                if getattr(block, "type", None) == "tool_use":
-                    current_tool = {"id": block.id, "name": block.name}
-                    tool_input_buffer = ""
-            elif etype == "content_block_delta":
-                delta = event.delta
-                dtype = getattr(delta, "type", None)
-                if dtype == "text_delta":
-                    yield LLMStreamEvent(type="text_delta", text=delta.text)
-                elif dtype == "input_json_delta":
-                    tool_input_buffer += delta.partial_json
-            elif etype == "content_block_stop":
-                if current_tool is not None:
-                    try:
-                        arguments = json.loads(tool_input_buffer) if tool_input_buffer else {}
-                    except json.JSONDecodeError:
-                        arguments = {}
-                    yield LLMStreamEvent(
-                        type="tool_call",
-                        tool_call=ToolCall(
-                            id=current_tool["id"],
-                            name=current_tool["name"],
-                            arguments=arguments,
-                        ),
-                    )
-                    current_tool = None
-                    tool_input_buffer = ""
-            elif etype == "message_delta":
-                delta_stop = getattr(event.delta, "stop_reason", None)
-                if delta_stop:
-                    stop_reason = delta_stop
-            elif etype == "message_stop":
-                yield LLMStreamEvent(type="done", stop_reason=stop_reason or "end_turn")
+        try:
+            for event in stream:
+                etype = getattr(event, "type", None)
+                if etype == "content_block_start":
+                    block = event.content_block
+                    if getattr(block, "type", None) == "tool_use":
+                        current_tool = {"id": block.id, "name": block.name}
+                        tool_input_buffer = ""
+                elif etype == "content_block_delta":
+                    delta = event.delta
+                    dtype = getattr(delta, "type", None)
+                    if dtype == "text_delta":
+                        yield LLMStreamEvent(type="text_delta", text=delta.text)
+                    elif dtype == "input_json_delta":
+                        tool_input_buffer += delta.partial_json
+                elif etype == "content_block_stop":
+                    if current_tool is not None:
+                        try:
+                            arguments = json.loads(tool_input_buffer) if tool_input_buffer else {}
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        yield LLMStreamEvent(
+                            type="tool_call",
+                            tool_call=ToolCall(
+                                id=current_tool["id"],
+                                name=current_tool["name"],
+                                arguments=arguments,
+                            ),
+                        )
+                        current_tool = None
+                        tool_input_buffer = ""
+                elif etype == "message_delta":
+                    delta_stop = getattr(event.delta, "stop_reason", None)
+                    if delta_stop:
+                        stop_reason = delta_stop
+                elif etype == "message_stop":
+                    saw_message_stop = True
+                    yield LLMStreamEvent(type="done", stop_reason=stop_reason or "end_turn")
+        finally:
+            # Stream may end without content_block_stop (network truncation,
+            # API timeout, cancellation mid tool_use). Flush whatever's in
+            # flight so the agent doesn't silently lose the tool call.
+            if current_tool is not None:
+                try:
+                    arguments = json.loads(tool_input_buffer) if tool_input_buffer else {}
+                except json.JSONDecodeError:
+                    arguments = {}
+                yield LLMStreamEvent(
+                    type="tool_call",
+                    tool_call=ToolCall(
+                        id=current_tool["id"],
+                        name=current_tool["name"],
+                        arguments=arguments,
+                    ),
+                )
+            if not saw_message_stop:
+                # Never got message_stop — synthesize a done event so the
+                # agent loop always terminates cleanly.
+                yield LLMStreamEvent(type="done", stop_reason=stop_reason or "incomplete")

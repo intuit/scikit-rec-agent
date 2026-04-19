@@ -90,3 +90,33 @@ def test_chat_stream_yields_text_and_tool_events():
     assert tool_events[0].tool_call.id == "tu_9"
     done = [e for e in out if e.type == "done"]
     assert done[-1].stop_reason == "tool_use"
+
+
+def test_chat_stream_flushes_in_flight_tool_call_on_truncation():
+    # Regression: stream ends mid tool_use (no content_block_stop, no
+    # message_stop). The adapter must flush the partial tool_call and yield a
+    # synthetic done so the agent doesn't silently lose the LLM's action.
+    events = [
+        SimpleNamespace(
+            type="content_block_start",
+            content_block=SimpleNamespace(type="tool_use", id="tu_trunc", name="echo"),
+        ),
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="input_json_delta", partial_json='{"message":"halfway"}'),
+        ),
+        # No content_block_stop, no message_stop — stream just ends.
+    ]
+    client = MagicMock()
+    client.messages.create.return_value = iter(events)
+    adapter = AnthropicAdapter(client=client)
+
+    out = list(adapter.chat_stream(messages=[], tools=[], system=""))
+
+    tool_events = [e for e in out if e.type == "tool_call"]
+    assert len(tool_events) == 1
+    assert tool_events[0].tool_call.id == "tu_trunc"
+    assert tool_events[0].tool_call.arguments == {"message": "halfway"}
+    done = [e for e in out if e.type == "done"]
+    assert len(done) == 1
+    assert done[0].stop_reason == "incomplete"

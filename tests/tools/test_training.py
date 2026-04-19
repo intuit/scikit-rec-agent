@@ -18,7 +18,7 @@ _TABULAR_CONFIG = {
 
 def test_train_model_from_bundle_id(binary_reward_paths, session):
     TOOL_CREATE_DATASETS.fn(
-        bundle_name="b",
+        bundle_id="b",
         interactions_path=binary_reward_paths["interactions"],
         users_path=binary_reward_paths["users"],
         items_path=binary_reward_paths["items"],
@@ -40,7 +40,7 @@ def test_train_model_from_bundle_id(binary_reward_paths, session):
 
 def test_train_model_factory_error_returns_envelope(binary_reward_paths, session):
     TOOL_CREATE_DATASETS.fn(
-        bundle_name="b",
+        bundle_id="b",
         interactions_path=binary_reward_paths["interactions"],
         users_path=binary_reward_paths["users"],
         items_path=binary_reward_paths["items"],

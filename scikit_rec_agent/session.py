@@ -43,6 +43,11 @@ class ModelHandle:
     metrics: dict[str, float] = field(default_factory=dict)  # "NDCG_at_k@10" → 0.347
     tags: list[str] = field(default_factory=list)
     created_at: str = ""
+    # Set to True after the first successful evaluate_model populated
+    # recommendation scores on the recommender's evaluation_session. Used to
+    # skip redundant score_items_kwargs passes across subsequent calls so
+    # scikit-rec's internal cache is honored.
+    score_cache_populated: bool = False
 
 
 @dataclass

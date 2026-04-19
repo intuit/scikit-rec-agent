@@ -9,7 +9,6 @@ def test_package_imports():
         "LLMStreamEvent",
         "ToolCall",
         "DEFAULT_SYSTEM_PROMPT",
-        "DEFAULT_TOOLS",
         "DatasetBundle",
         "ModelHandle",
         "Session",

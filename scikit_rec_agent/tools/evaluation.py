@@ -81,6 +81,7 @@ def _evaluate_model(
     k_values: list[int],
     session,
     eval_kwargs: dict[str, Any] | None = None,
+    refresh_scores: bool = False,
 ) -> dict[str, Any]:
     from skrec.evaluator.datatypes import RecommenderEvaluatorType
     from skrec.metrics.datatypes import RecommenderMetricType
@@ -103,9 +104,14 @@ def _evaluate_model(
             valid = [x.value for x in RecommenderMetricType]
             return err("InvalidMetric", f"Unknown metric '{m}'. Valid: {valid}")
 
-    # On the first call (nothing cached), we must provide score_items_kwargs.
-    # Subsequent calls with changed metrics/k reuse cached scores.
-    score_items_kwargs = _build_score_items_kwargs(session, handle) or None
+    # Only build + pass score_items_kwargs on the FIRST evaluate_model call
+    # for this model (or when the caller explicitly asks to refresh). The
+    # recommender's evaluation_session caches recommendation scores; passing
+    # score_items_kwargs every time re-scores from scratch and defeats the
+    # cache. Pass refresh_scores=True after you've changed the bundle's
+    # validation data or re-trained the model on new data.
+    should_rescore = refresh_scores or not handle.score_cache_populated
+    score_items_kwargs = _build_score_items_kwargs(session, handle) if should_rescore else None
 
     effective_eval_kwargs: dict[str, Any] = dict(eval_kwargs or {})
     if not effective_eval_kwargs and evaluator_type == "simple":
@@ -132,6 +138,8 @@ def _evaluate_model(
             key = f"{metric_name}@{k}"
             handle.metrics[key] = float(value)
             results.append({"metric": metric_name, "k": int(k), "value": float(value)})
+    if score_items_kwargs:
+        handle.score_cache_populated = True
 
     return ok({"model_id": model_id, "evaluator_type": evaluator_type, "results": results})
 
@@ -178,6 +186,15 @@ TOOL_EVALUATE_MODEL = Tool(
                     "Evaluator-specific kwargs: logged_items, logged_rewards, logging_proba, "
                     "expected_rewards. Auto-derived from validation interactions when omitted "
                     "for 'simple'."
+                ),
+            },
+            "refresh_scores": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Force re-scoring against the bundle's validation data. Pass True after "
+                    "you've re-split the bundle or re-trained the model so cached scores are "
+                    "invalidated. Default False keeps scikit-rec's score cache warm across calls."
                 ),
             },
         },

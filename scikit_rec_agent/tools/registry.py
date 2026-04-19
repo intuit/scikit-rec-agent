@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,37 @@ from scikit_rec_agent.tools import Tool, err, ok
 
 REGISTRY_ROOT = Path.home() / ".scikit-rec" / "registry"
 
+# Reject anything that isn't a simple identifier — keeps the LLM (or a
+# confused user) from steering save/load toward arbitrary filesystem paths
+# via `../` traversal or absolute paths. Both cases would otherwise bypass
+# REGISTRY_ROOT entirely, and load_model's pickle.load would become an RCE
+# vector against any .pkl the agent can be convinced to point at.
+_VALID_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
-def _model_dir(model_name: str) -> Path:
-    return REGISTRY_ROOT / model_name
+
+def _validate_model_name(model_name: str) -> str | None:
+    """Return an error message if model_name is unsafe, else None."""
+    if not isinstance(model_name, str) or not model_name:
+        return "model_name must be a non-empty string."
+    if model_name in {".", ".."}:
+        return "model_name must not be '.' or '..'."
+    if not _VALID_MODEL_NAME.match(model_name):
+        return "model_name must match [A-Za-z0-9][A-Za-z0-9_.-]* (no slashes, no leading dots)."
+    return None
+
+
+def _safe_model_dir(model_name: str) -> Path:
+    """Resolve a registry path and confirm it's inside REGISTRY_ROOT.
+
+    Belt-and-suspenders on top of _validate_model_name: even if that
+    validation is softened in future, `.resolve().is_relative_to()` blocks
+    traversal.
+    """
+    root = REGISTRY_ROOT.resolve()
+    mdir = (REGISTRY_ROOT / model_name).resolve()
+    if not mdir.is_relative_to(root):
+        raise ValueError(f"model_name '{model_name}' escapes registry root.")
+    return mdir
 
 
 def _save_model(model_id: str, session, tags: list[str] | None = None) -> dict[str, Any]:
@@ -31,7 +60,14 @@ def _save_model(model_id: str, session, tags: list[str] | None = None) -> dict[s
     if handle is None:
         return err("ModelNotFound", f"No trained model '{model_id}' in session.")
 
-    mdir = _model_dir(handle.name)
+    name_err = _validate_model_name(handle.name)
+    if name_err:
+        return err("InvalidModelName", name_err)
+    try:
+        mdir = _safe_model_dir(handle.name)
+    except ValueError as e:
+        return err("InvalidModelName", str(e))
+
     if mdir.exists():
         return err(
             "NameCollision",
@@ -158,7 +194,13 @@ TOOL_LIST_MODELS = Tool(
 
 
 def _load_model(model_name: str, session) -> dict[str, Any]:
-    mdir = _model_dir(model_name)
+    name_err = _validate_model_name(model_name)
+    if name_err:
+        return err("InvalidModelName", name_err)
+    try:
+        mdir = _safe_model_dir(model_name)
+    except ValueError as e:
+        return err("InvalidModelName", str(e))
     if not mdir.exists():
         return err("ModelNotFound", f"No model named '{model_name}' in registry at {REGISTRY_ROOT}.")
     if not (mdir / "meta.json").exists() or not (mdir / "model.pkl").exists():
@@ -201,7 +243,10 @@ TOOL_LOAD_MODEL = Tool(
     name="load_model",
     description=(
         "Load a registered model into the current session. Subsequent evaluate_model / "
-        "compare_models / save_model calls can reference it by the returned model_id."
+        "compare_models / save_model calls can reference it by the returned model_id. "
+        "TRUST NOTE: load_model unpickles arbitrary Python objects from the registry "
+        "path. Only load models you or a colleague saved — don't point it at files you "
+        "didn't produce yourself."
     ),
     input_schema={
         "type": "object",

@@ -5,7 +5,7 @@ provided (e.g. {"userid": "USER_ID"}), the data file is renamed-and-copied to
 a temp CSV so the Dataset sees the expected column names. Schemas are
 auto-generated from dtypes unless the caller provides explicit YAML paths.
 
-Registers the resulting bundle on the Session under bundle_id == bundle_name.
+Registers the resulting bundle on the Session keyed by bundle_id.
 """
 
 from __future__ import annotations
@@ -22,6 +22,14 @@ from scikit_rec_agent.tools import Tool, err, ok
 
 _SUPPORTED_TYPES = {"int", "float", "str"}
 
+# Columns whose types are dictated by scikit-rec's required schemas. When
+# auto-generating a schema we must honor these regardless of pandas dtype —
+# otherwise a binary OUTCOME loaded as int64 generates OUTCOME: int, which
+# DatasetSchema's required-schema validation rejects (it expects float).
+_REQUIRED_INTERACTIONS_TYPES = {"USER_ID": "str", "ITEM_ID": "str", "OUTCOME": "float"}
+_REQUIRED_USERS_TYPES = {"USER_ID": "str"}
+_REQUIRED_ITEMS_TYPES = {"ITEM_ID": "str"}
+
 
 def _pandas_to_schema_type(dtype) -> str:
     if pd.api.types.is_integer_dtype(dtype):
@@ -31,8 +39,29 @@ def _pandas_to_schema_type(dtype) -> str:
     return "str"
 
 
-def _generate_schema(df: pd.DataFrame) -> dict[str, Any]:
-    columns = [{"name": c, "type": _pandas_to_schema_type(df[c].dtype)} for c in df.columns]
+def _required_overrides_for(file_type: str) -> dict[str, str]:
+    if file_type == "interactions":
+        return _REQUIRED_INTERACTIONS_TYPES
+    if file_type == "users":
+        return _REQUIRED_USERS_TYPES
+    if file_type == "items":
+        return _REQUIRED_ITEMS_TYPES
+    return {}
+
+
+def _generate_schema(df: pd.DataFrame, file_type: str = "interactions") -> dict[str, Any]:
+    overrides = _required_overrides_for(file_type)
+    columns = []
+    for c in df.columns:
+        # Multi-outcome pattern: OUTCOME_revenue, OUTCOME_clicks, ... all must
+        # be float for scikit-rec to consume them as rewards.
+        if c.startswith("OUTCOME_"):
+            columns.append({"name": c, "type": "float"})
+            continue
+        if c in overrides:
+            columns.append({"name": c, "type": overrides[c]})
+            continue
+        columns.append({"name": c, "type": _pandas_to_schema_type(df[c].dtype)})
     return {"columns": columns}
 
 
@@ -57,7 +86,8 @@ def _prepare_source(path: str, column_mapping: dict[str, str] | None, tmp_dir: s
 def _write_schema(df: pd.DataFrame, name: str, tmp_dir: str, explicit: str | None) -> str:
     if explicit:
         return explicit
-    schema = _generate_schema(df)
+    # `name` here doubles as the file_type ("interactions" / "users" / "items").
+    schema = _generate_schema(df, file_type=name)
     out_path = os.path.join(tmp_dir, f"{name}_schema.yaml")
     with open(out_path, "w") as f:
         yaml.safe_dump(schema, f, sort_keys=False)
@@ -65,7 +95,7 @@ def _write_schema(df: pd.DataFrame, name: str, tmp_dir: str, explicit: str | Non
 
 
 def _create_datasets(
-    bundle_name: str,
+    bundle_id: str,
     interactions_path: str,
     session,
     users_path: str | None = None,
@@ -83,7 +113,7 @@ def _create_datasets(
         return err("FileNotFoundError", f"interactions_path not found: {interactions_path}")
 
     schemas = schemas or {}
-    tmp_dir = tempfile.mkdtemp(prefix=f"skragent_{bundle_name}_")
+    tmp_dir = tempfile.mkdtemp(prefix=f"skragent_{bundle_id}_")
     schema_paths: dict[str, str] = {}
     source_paths: dict[str, str] = {"interactions": interactions_path}
 
@@ -132,7 +162,7 @@ def _create_datasets(
         return err(type(e).__name__, str(e))
 
     bundle = DatasetBundle(
-        bundle_id=bundle_name,
+        bundle_id=bundle_id,
         interactions=interactions_ds,
         users=users_ds,
         items=items_ds,
@@ -141,11 +171,11 @@ def _create_datasets(
         schema_paths=schema_paths,
         source_paths=source_paths,
     )
-    session.loaded_datasets[bundle_name] = bundle
+    session.loaded_datasets[bundle_id] = bundle
 
     return ok(
         {
-            "bundle_id": bundle_name,
+            "bundle_id": bundle_id,
             "schema_paths": schema_paths,
             "columns": list(inter_df.columns),
             "n_interactions": int(len(inter_df)),
@@ -162,14 +192,15 @@ TOOL_CREATE_DATASETS = Tool(
     description=(
         "Build scikit-rec Dataset handles. Auto-generates YAML schemas from the data types "
         "if schemas are not provided. Applies column_mapping to rename columns to USER_ID/"
-        "ITEM_ID/OUTCOME as needed. Registers the handles in the session under bundle_id = "
-        "bundle_name. Optionally registers validation and test interaction files under the "
-        "same bundle."
+        "ITEM_ID/OUTCOME as needed. Registers the handles in the session keyed by bundle_id; "
+        "downstream tools (split_data, train_model, evaluate_model, run_hpo) reference the "
+        "bundle by this id. Optionally registers validation and test interaction files "
+        "under the same bundle."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "bundle_name": {"type": "string"},
+            "bundle_id": {"type": "string"},
             "interactions_path": {"type": "string"},
             "users_path": {"type": "string"},
             "items_path": {"type": "string"},
@@ -186,7 +217,7 @@ TOOL_CREATE_DATASETS = Tool(
                 ),
             },
         },
-        "required": ["bundle_name", "interactions_path"],
+        "required": ["bundle_id", "interactions_path"],
     },
     fn=_create_datasets,
 )

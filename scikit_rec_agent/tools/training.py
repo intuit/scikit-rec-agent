@@ -41,7 +41,7 @@ def _resolve_bundle(
         )
     implicit_name = f"implicit_bundle_{int(time.time() * 1000)}"
     result = _build_bundle(
-        bundle_name=implicit_name,
+        bundle_id=implicit_name,
         interactions_path=interactions_path,
         session=session,
         users_path=users_path,

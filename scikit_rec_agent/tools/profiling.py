@@ -65,10 +65,16 @@ def _detect_timestamp_column(df: pd.DataFrame) -> str | None:
 
 
 def _classify_target(series: pd.Series) -> str:
-    if series.dtype == bool or set(series.dropna().unique()).issubset({0, 1, 0.0, 1.0}):
+    non_null = series.dropna()
+    n_unique = non_null.nunique()
+    # A single-value target is degenerate — model selection heuristics
+    # shouldn't try to fit a classifier to it.
+    if n_unique <= 1:
+        return "constant"
+    if series.dtype == bool or set(non_null.unique()).issubset({0, 1, 0.0, 1.0}):
         return "binary"
     if pd.api.types.is_integer_dtype(series) or pd.api.types.is_float_dtype(series):
-        uniques = series.dropna().unique()
+        uniques = non_null.unique()
         if len(uniques) <= 10 and set(uniques).issubset(set(range(1, 11))):
             return "rating"
         return "continuous"

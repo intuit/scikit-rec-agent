@@ -85,11 +85,19 @@ class Agent:
                 elif event.type == "done":
                     stop_reason = event.stop_reason
 
-            assistant_content = _build_assistant_content("".join(text_parts), tool_calls)
-            self.session.messages.append({"role": "assistant", "content": assistant_content})
+            text = "".join(text_parts)
+            assistant_content = _build_assistant_content(text, tool_calls)
+            if assistant_content:
+                # Skip empty assistant turns. Anthropic's API rejects messages
+                # with content=[] on the next invocation; happens in practice
+                # with low max_tokens, mid-stream truncations, or refusal stops.
+                self.session.messages.append({"role": "assistant", "content": assistant_content})
 
             if not tool_calls:
-                yield AgentEvent(type="done", stop_reason=stop_reason or "end_turn")
+                reason = stop_reason or "end_turn"
+                if not assistant_content:
+                    reason = "empty_response"
+                yield AgentEvent(type="done", stop_reason=reason)
                 return
 
             tool_result_blocks = []

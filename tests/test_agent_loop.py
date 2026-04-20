@@ -158,3 +158,30 @@ def test_agent_skips_empty_assistant_turn(session):
     assert session.messages == [{"role": "user", "content": "hi"}]
     done = [e for e in events if e.type == "done"]
     assert done[-1].stop_reason == "empty_response"
+
+
+def test_safeguards_enabled_by_default_emits_warning(session):
+    # A model response with a fabricated URL should produce a warning event.
+    llm = ScriptedLLM(responses=["Grab the data at https://made-up.example/nope.csv"])
+    agent = Agent(llm=llm, tools=[], system_prompt="sys", session=session)
+
+    events = list(agent.chat_turn("where?"))
+
+    warnings = [e for e in events if e.type == "warning"]
+    assert len(warnings) == 1, "safeguards should fire on novel URLs by default"
+
+
+def test_safeguards_can_be_disabled(session):
+    # Same scenario with enable_safeguards=False must produce zero warnings.
+    llm = ScriptedLLM(responses=["Grab the data at https://made-up.example/nope.csv"])
+    agent = Agent(
+        llm=llm,
+        tools=[],
+        system_prompt="sys",
+        session=session,
+        enable_safeguards=False,
+    )
+
+    events = list(agent.chat_turn("where?"))
+
+    assert not [e for e in events if e.type == "warning"]

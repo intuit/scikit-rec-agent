@@ -45,6 +45,26 @@ Eleven tools cover the full scikit-rec workflow: profile data, validate schemas,
 
 The system prompt is built at import time from scikit-rec's live enum maps, so new recommender/scorer/estimator types get picked up automatically.
 
+## Hallucination safeguards
+
+The agent runs two deterministic detectors on every turn's output:
+
+- **URL echo check** — flags `https://...` links the model introduces that the user did not supply this session. Shipped adapters have no web retrieval, so model-introduced URLs are common fabrications.
+- **Foreign-reference check** — scans fenced Python blocks for imports and bare-alias usage outside `{skrec, scikit_rec, scikit_rec_agent, stdlib}`. Library APIs we own have a runtime backstop via the scikit-rec factory; external libraries don't.
+
+Warnings are emitted as `AgentEvent(type="warning")` and never enter conversation history. Opt out with `Agent(..., enable_safeguards=False)`.
+
+### Scope and limitations
+
+The detectors are deliberately narrow. **They catch the common confident-plausible-looking fabrication case with near-zero false positives, not every possible hallucination.** What they do *not* catch:
+
+- Semantic errors inside trusted APIs (wrong `RecommenderConfig` shape, poor metric choice). The scikit-rec factory catches bad configs at `train_model`; the rest is on the user.
+- Invented keyword arguments for external libraries. We flag `pandas` as unverified, not the specific `make_up_kwarg=True`.
+- Fabricated dataset names, paper citations, or prose claims. We only inspect URLs and Python code blocks.
+- Adversarial evasion (aliased `importlib`, f-string import args, triple-backticks inside docstrings, `ast.parse`-rejecting blocks).
+
+See [`scikit_rec_agent/safeguards.py`](./scikit_rec_agent/safeguards.py) for the full contract.
+
 ## Architecture
 
 See [`agentic_design.md`](./agentic_design.md) for the authoritative spec.

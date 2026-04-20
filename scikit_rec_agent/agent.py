@@ -2,51 +2,43 @@
 
 Responsibilities:
   - Build system prompt and tool schemas from registered Tool objects
-  - Stream LLM output to the caller as events (text_delta, tool_call, tool_result, done)
+  - Stream LLM output to the caller as events (text_delta, tool_call,
+    tool_result, warning, done)
   - Execute tool calls against the Session
   - Append conversation history to the Session
+  - Run post-hoc hallucination safeguards on the model's final text
 
-Internal message format is Anthropic-native (content blocks); the OpenAI adapter
-translates on the way in and out. See llm/base.py for the BaseLLM protocol.
+Internal message format is Anthropic-native (content blocks); the OpenAI
+adapter translates on the way in and out. See llm/base.py for the BaseLLM
+protocol. See safeguards.py for URL and foreign-reference detection.
 """
 
 from __future__ import annotations
 
-import ast
 import json
-import re
 import sys
 from dataclasses import dataclass
 from typing import Any, Iterator
 
 from scikit_rec_agent.llm.base import BaseLLM, ToolCall
+from scikit_rec_agent.safeguards import (
+    EXTERNAL_REFERENCE_WARNING,
+    URL_PATTERN,
+    detect_foreign_references,
+    detect_novel_urls,
+)
 from scikit_rec_agent.session import Session
 from scikit_rec_agent.tools import Tool, err, get_default_tools
 
 MAX_TOOL_ITERATIONS = 20
 
-# Shipped adapters have no web retrieval, so any URL in model output is
-# potentially fabricated. Flag deterministically rather than asking the LLM
-# to self-flag — the metacognition that would catch the hallucination is the
-# same thing that missed it.
-_URL_PATTERN = re.compile(r"https?://\S+")
-EXTERNAL_REFERENCE_WARNING = (
-    "External references detected. URLs, dataset names, and citations may be "
-    "hallucinated — verify before acting on them."
-)
-
-# The scikit-rec factory and agent tool loop validate configs at runtime, so
-# library APIs have a backstop. External libraries (pandas/sklearn/torch/etc.)
-# don't — the model may invent signatures that look plausible but don't match
-# the installed version. Flag any foreign import in generated code blocks.
-_GROUNDED_IMPORT_ROOTS = frozenset({"skrec", "scikit_rec", "scikit_rec_agent"})
-_PYTHON_BLOCK_PATTERN = re.compile(r"```(?:python|py)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-
 
 @dataclass
 class AgentEvent:
-    """Event yielded by chat_turn. Extends LLMStreamEvent with tool_result events
-    the Agent loop emits after dispatching a tool call.
+    """Event yielded by chat_turn.
+
+    Extends LLMStreamEvent with tool_result events emitted by the dispatch
+    loop and warning events emitted by the end-of-turn safeguards.
     """
 
     type: str  # "text_delta" | "tool_call" | "tool_result" | "warning" | "done"
@@ -64,7 +56,18 @@ class Agent:
         tools: list[Tool] | None = None,
         system_prompt: str | None = None,
         session: Session | None = None,
+        enable_safeguards: bool = True,
     ):
+        """Construct an Agent.
+
+        Args:
+            enable_safeguards: when True (default), end-of-turn URL and
+                foreign-code warnings are emitted as ``AgentEvent(type=
+                "warning")`` — see :mod:`scikit_rec_agent.safeguards` for
+                what is and is not detected. Set to False to suppress all
+                safeguard warnings (useful for callers that display their
+                own disclaimers or for testing).
+        """
         from scikit_rec_agent.prompts import DEFAULT_SYSTEM_PROMPT
 
         # Catch adapters that forgot a method or misspelled one at
@@ -80,6 +83,7 @@ class Agent:
         self.tools = tools if tools is not None else get_default_tools()
         self.system_prompt = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
         self.session = session if session is not None else Session()
+        self.enable_safeguards = enable_safeguards
         self._tools_by_name = {t.name: t for t in self.tools}
 
     # ----- public API -----
@@ -92,6 +96,7 @@ class Agent:
         the LLM is re-invoked.
         """
         self.session.messages.append({"role": "user", "content": user_message})
+        self.session.user_supplied_urls.update(URL_PATTERN.findall(user_message))
         tool_schemas = [t.as_llm_schema() for t in self.tools]
         turn_text_parts: list[str] = []
 
@@ -127,17 +132,10 @@ class Agent:
                 reason = stop_reason or "end_turn"
                 if not assistant_content:
                     reason = "empty_response"
-                turn_text = "".join(turn_text_parts)
-                if _URL_PATTERN.search(turn_text):
-                    yield AgentEvent(type="warning", text=EXTERNAL_REFERENCE_WARNING)
-                foreign_imports = _foreign_imports_in_code_blocks(turn_text)
-                if foreign_imports:
-                    yield AgentEvent(
-                        type="warning",
-                        text=(
-                            "Python examples reference external libraries — signatures unverified: "
-                            f"{', '.join(sorted(foreign_imports))}. Check against installed versions."
-                        ),
+                if self.enable_safeguards:
+                    yield from _emit_safeguard_warnings(
+                        "".join(turn_text_parts),
+                        self.session.user_supplied_urls,
                     )
                 yield AgentEvent(type="done", stop_reason=reason)
                 return
@@ -230,30 +228,23 @@ def _build_assistant_content(text: str, tool_calls: list[ToolCall]) -> list[dict
     return blocks
 
 
-def _foreign_imports_in_code_blocks(text: str) -> set[str]:
-    """Return the set of foreign import roots in any fenced ```python block.
+def _emit_safeguard_warnings(turn_text: str, echoed_urls: set[str]) -> Iterator[AgentEvent]:
+    """Yield warning events for hallucination risks found in the turn's text.
 
-    Library APIs we own (skrec / scikit_rec / scikit_rec_agent) are backstopped
-    by the factory and tool loop at runtime. Everything else is ungrounded, so
-    a foreign import in a code example is a plausibility — not a verified
-    signature. Unparseable blocks are silently skipped to avoid false positives
-    on pseudocode or truncated snippets.
+    Two distinct warnings so the user can act on each independently:
+    - Novel URLs that the user didn't supply this session (possible URL
+      fabrication)
+    - Foreign package roots referenced in Python code blocks (unverified
+      signatures from libraries the factory / tool loop can't validate)
     """
-    foreign: set[str] = set()
-    stdlib = getattr(sys, "stdlib_module_names", frozenset())
-    for match in _PYTHON_BLOCK_PATTERN.finditer(text):
-        try:
-            tree = ast.parse(match.group(1))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    root = alias.name.split(".", 1)[0]
-                    if root not in _GROUNDED_IMPORT_ROOTS and root not in stdlib:
-                        foreign.add(root)
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                root = node.module.split(".", 1)[0]
-                if root not in _GROUNDED_IMPORT_ROOTS and root not in stdlib:
-                    foreign.add(root)
-    return foreign
+    if detect_novel_urls(turn_text, echoed_urls):
+        yield AgentEvent(type="warning", text=EXTERNAL_REFERENCE_WARNING)
+    foreign = detect_foreign_references(turn_text)
+    if foreign:
+        yield AgentEvent(
+            type="warning",
+            text=(
+                "Python examples reference external libraries — signatures unverified: "
+                f"{', '.join(sorted(foreign))}. Check against installed versions."
+            ),
+        )

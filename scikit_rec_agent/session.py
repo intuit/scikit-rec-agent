@@ -55,6 +55,10 @@ class Session:
     loaded_datasets: dict[str, DatasetBundle] = field(default_factory=dict)
     trained_models: dict[str, ModelHandle] = field(default_factory=dict)
     messages: list[dict[str, Any]] = field(default_factory=list)
+    # URLs the user has typed or pasted this session. The URL-echo check in
+    # agent.chat_turn subtracts this set from URLs detected in model output
+    # so we don't warn on "you said X; here's X back."
+    user_supplied_urls: set[str] = field(default_factory=set)
 
 
 def new_model_id(recommender_type: str) -> str:

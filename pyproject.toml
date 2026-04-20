@@ -9,15 +9,26 @@ description = "Conversational AI agent that drives scikit-rec via tool use"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "scikit-rec>=0.3.0,<1.0.0",
+]
 
 [project.optional-dependencies]
+anthropic = ["anthropic>=0.40.0"]
+openai = ["openai>=1.0.0"]
+torch = ["scikit-rec[torch]>=0.3.0,<1.0.0"]
+aws = ["scikit-rec[aws]>=0.3.0,<1.0.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.4",
     "mypy>=1.0",
+    "anthropic>=0.40.0",
+    "openai>=1.0.0",
 ]
+
+[project.scripts]
+scikit-rec-agent = "scikit_rec_agent.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/intuit/scikit-rec-agent"

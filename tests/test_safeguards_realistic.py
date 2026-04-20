@@ -34,8 +34,7 @@ def test_fabricated_kaggle_link_for_amazon_books():
 def test_echoed_user_supplied_url_does_not_warn():
     # User pasted a URL; model quotes it back. Should not warn.
     model_text = (
-        "Using the interactions at https://storage.example.com/clicks.csv, "
-        "I can profile it with the profile_data tool."
+        "Using the interactions at https://storage.example.com/clicks.csv, I can profile it with the profile_data tool."
     )
     echoed = {"https://storage.example.com/clicks.csv"}
     assert detect_novel_urls(model_text, echoed=echoed) == set()

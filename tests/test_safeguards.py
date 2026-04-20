@@ -119,14 +119,7 @@ def test_function_param_does_not_suppress_module_level_usage():
     # The bug the round-2 review caught: def demo(pd) made pd "locally defined"
     # globally, hiding bare pd.read_csv at module level. Scope-aware visitor
     # must bind pd only inside demo's scope.
-    code = (
-        "```python\n"
-        "def demo(pd):\n"
-        "    return pd.head()\n"
-        "\n"
-        "df = pd.read_csv('x.csv')\n"
-        "```"
-    )
+    code = "```python\ndef demo(pd):\n    return pd.head()\n\ndf = pd.read_csv('x.csv')\n```"
     assert "pandas" in detect_foreign_references(code)
 
 
@@ -134,25 +127,12 @@ def test_class_body_binding_is_invisible_to_methods():
     # Python semantics: methods can't see class-body names without `self.`
     # or `ClassName.`. Detector must flag bare pd inside the method even if
     # the class body declares `pd = something`.
-    code = (
-        "```python\n"
-        "class Foo:\n"
-        "    pd = something\n"
-        "    def bar(self):\n"
-        "        return pd.read_csv('x.csv')\n"
-        "```"
-    )
+    code = "```python\nclass Foo:\n    pd = something\n    def bar(self):\n        return pd.read_csv('x.csv')\n```"
     assert "pandas" in detect_foreign_references(code)
 
 
 def test_module_level_import_visible_in_nested_function():
-    code = (
-        "```python\n"
-        "import pandas as pd\n"
-        "def demo():\n"
-        "    return pd.read_csv('x.csv')\n"
-        "```"
-    )
+    code = "```python\nimport pandas as pd\ndef demo():\n    return pd.read_csv('x.csv')\n```"
     assert detect_foreign_references(code) == {"pandas"}
 
 
@@ -177,12 +157,7 @@ def test_other_binding_forms_suppress_alias(snippet):
 
 def test_comprehension_binding_does_not_leak_outward():
     # Comprehension scope is local; after the comp, pd is unbound again.
-    code = (
-        "```python\n"
-        "rows = [pd for pd in data]\n"
-        "df = pd.read_csv('x.csv')\n"
-        "```"
-    )
+    code = "```python\nrows = [pd for pd in data]\ndf = pd.read_csv('x.csv')\n```"
     assert "pandas" in detect_foreign_references(code)
 
 
@@ -245,10 +220,7 @@ def test_empty_and_whitespace_only_blocks():
 
 
 def test_multiple_blocks_are_all_scanned():
-    code = (
-        "First:\n```python\nimport pandas\n```\n"
-        "Second:\n```python\nimport torch\n```"
-    )
+    code = "First:\n```python\nimport pandas\n```\nSecond:\n```python\nimport torch\n```"
     assert detect_foreign_references(code) == {"pandas", "torch"}
 
 

@@ -79,10 +79,24 @@ _NOTEBOOK_MAGIC_LINE = re.compile(r"^\s*[!%?].*$", re.MULTILINE)
 # Cell magics whose bodies are NOT Python. If a block starts with one of
 # these, skip scanning entirely — trying to ast.parse an HTML/SQL/shell body
 # will either explode or, worse, parse partially and miss real imports.
-_NON_PYTHON_CELL_MAGICS = frozenset({
-    "html", "bash", "shell", "sh", "javascript", "js", "sql",
-    "markdown", "md", "writefile", "perl", "ruby", "latex", "svg",
-})
+_NON_PYTHON_CELL_MAGICS = frozenset(
+    {
+        "html",
+        "bash",
+        "shell",
+        "sh",
+        "javascript",
+        "js",
+        "sql",
+        "markdown",
+        "md",
+        "writefile",
+        "perl",
+        "ruby",
+        "latex",
+        "svg",
+    }
+)
 
 # Conservative bare-alias → package map. Models often emit `pd.read_csv(...)`
 # or `sklearn.ensemble.RandomForestClassifier(...)` without the corresponding

@@ -69,6 +69,10 @@ See [`scikit_rec_agent/safeguards.py`](./scikit_rec_agent/safeguards.py) for the
 
 See [`agentic_design.md`](./agentic_design.md) for the authoritative spec.
 
+## Contributing
+
+Contributions welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for dev setup, test commands, and where new work fits best.
+
 ## License
 
 Apache-2.0

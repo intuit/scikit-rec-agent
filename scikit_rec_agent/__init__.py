@@ -17,11 +17,13 @@ for _k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     _os.environ.setdefault(_k, "1")
 del _os, _k
 
-from scikit_rec_agent.agent import Agent, AgentEvent
-from scikit_rec_agent.llm.base import BaseLLM, LLMResponse, LLMStreamEvent, ToolCall
-from scikit_rec_agent.prompts import DEFAULT_SYSTEM_PROMPT
-from scikit_rec_agent.session import DatasetBundle, ModelHandle, Session
-from scikit_rec_agent.tools import Tool, err, get_default_tools, ok
+# Imports MUST happen after the env-var pin above so torch / numpy read
+# the threading limits at import time. ruff E402 is intentionally suppressed.
+from scikit_rec_agent.agent import Agent, AgentEvent  # noqa: E402
+from scikit_rec_agent.llm.base import BaseLLM, LLMResponse, LLMStreamEvent, ToolCall  # noqa: E402
+from scikit_rec_agent.prompts import DEFAULT_SYSTEM_PROMPT  # noqa: E402
+from scikit_rec_agent.session import DatasetBundle, ModelHandle, Session  # noqa: E402
+from scikit_rec_agent.tools import Tool, err, get_default_tools, ok  # noqa: E402
 
 __all__ = [
     "Agent",

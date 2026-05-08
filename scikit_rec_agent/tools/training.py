@@ -63,8 +63,9 @@ def _train_model(
     items_path: str | None = None,
     column_mapping: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    from scikit_rec_agent.tools.diagnose import _quick_diagnose, record_failure
     from skrec.orchestrator import create_recommender_pipeline
+
+    from scikit_rec_agent.tools.diagnose import _quick_diagnose, record_failure
 
     if not isinstance(config, dict):
         return err("ArgumentError", "config must be a dict.")
@@ -114,11 +115,7 @@ def _train_model(
     # the recommender_type doesn't have to be hardcoded here.
     if bundle.valid_interactions is not None and "valid_interactions_ds" in accepted_train_kwargs:
         train_kwargs["valid_interactions_ds"] = bundle.valid_interactions
-    if (
-        bundle.users is not None
-        and bundle.valid_interactions is not None
-        and "valid_users_ds" in accepted_train_kwargs
-    ):
+    if bundle.users is not None and bundle.valid_interactions is not None and "valid_users_ds" in accepted_train_kwargs:
         train_kwargs["valid_users_ds"] = bundle.users
     if "use_validation" in accepted_train_kwargs and bundle.valid_interactions is not None:
         # Sequential recommenders take a bool flag instead of a separate

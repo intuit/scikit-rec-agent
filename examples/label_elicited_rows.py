@@ -35,10 +35,7 @@ CORPUS_PATH = _REPO_ROOT / "examples" / "halluc_corpus.jsonl"
 # Used in §7.3 when discussing real-world hallucination patterns. Only rows
 # with non-trivial commentary appear here; everything else gets a generic note.
 NOTES: dict[str, str] = {
-    "halluc_0000": (
-        "clean negative: model listed datasets in prose only — no URLs, no code blocks. "
-        "Useful baseline."
-    ),
+    "halluc_0000": ("clean negative: model listed datasets in prose only — no URLs, no code blocks. Useful baseline."),
     "halluc_0001": (
         "multi-URL fabrication: 7 URLs across grouplens.org, netflixprize.com, AWS, last.fm, yelp.com. "
         "All emitted with confident framing as 'direct download links'. The 3 grouplens "
@@ -75,10 +72,7 @@ NOTES: dict[str, str] = {
     ),
 }
 
-_GENERIC_NOTE = (
-    "Rule A: URLs model-introduced (not in trusted set); "
-    "no fenced Python blocks → foreign-ref negative."
-)
+_GENERIC_NOTE = "Rule A: URLs model-introduced (not in trusted set); no fenced Python blocks → foreign-ref negative."
 
 
 def main() -> int:

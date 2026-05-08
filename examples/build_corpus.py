@@ -53,9 +53,7 @@ def _ensure_system_prompts_file() -> None:
     if SYS_PROMPTS_PATH.exists():
         return
     SYS_PROMPTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SYS_PROMPTS_PATH.write_text(
-        json.dumps({SYS_PROMPT_ID: DEFAULT_SYSTEM_PROMPT}, indent=2) + "\n"
-    )
+    SYS_PROMPTS_PATH.write_text(json.dumps({SYS_PROMPT_ID: DEFAULT_SYSTEM_PROMPT}, indent=2) + "\n")
 
 
 def _load_session(theme: str) -> Session:

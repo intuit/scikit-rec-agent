@@ -20,7 +20,6 @@ import pandas as pd
 
 from scikit_rec_agent.tools import Tool, err, ok
 
-
 # ---------------------------------------------------------------------------
 # Compatibility filter (mirrors scikit-rec's factory guard rails)
 # ---------------------------------------------------------------------------
@@ -63,6 +62,7 @@ _TABULAR_REGRESSION = {
     "xgboost": {"n_estimators": 50, "max_depth": 4, "learning_rate": 0.1},
 }
 
+
 # Embedding-family configs.  Each maps to one entry in scikit-rec's
 # orchestrator.factory._EMBEDDING_ESTIMATOR_MAP. The factory wires the params
 # straight through to the underlying estimator's __init__, so the parameter
@@ -100,25 +100,53 @@ def _embedding_method(short_name: str, model_type: str, params: dict) -> dict:
 # seconds — users wanting more thorough training can pass an explicit
 # `methods` list with bigger configs.
 _EMBEDDING_FAMILIES = [
-    _embedding_method("mf_universal", "matrix_factorization",
-                      {"n_factors": 16, "epochs": 5, "random_state": 42}),
-    _embedding_method("ncf_universal", "ncf",
-                      {"ncf_type": "neumf", "gmf_embedding_dim": 8,
-                       "mlp_embedding_dim": 8, "mlp_layers": [16, 8],
-                       "dropout": 0.1, "learning_rate": 0.01,
-                       "epochs": 3, "batch_size": 32, "random_state": 42}),
-    _embedding_method("two_tower_universal", "two_tower",
-                      {"user_embedding_dim": 16, "item_embedding_dim": 16,
-                       "final_embedding_dim": 8, "user_tower_hidden_dim1": 32,
-                       "item_tower_hidden_dim1": 32, "epochs": 3,
-                       "batch_size": 32, "random_state": 42}),
-    _embedding_method("dcn_universal", "deep_cross_network",
-                      {"embedding_dim": 16, "num_cross_layers": 2,
-                       "deep_hidden_dim1": 32, "epochs": 3,
-                       "batch_size": 32, "random_state": 42}),
-    _embedding_method("nfm_universal", "neural_factorization",
-                      {"embedding_dim": 16, "mlp_hidden_dim1": 32,
-                       "epochs": 3, "batch_size": 32, "random_state": 42}),
+    _embedding_method("mf_universal", "matrix_factorization", {"n_factors": 16, "epochs": 5, "random_state": 42}),
+    _embedding_method(
+        "ncf_universal",
+        "ncf",
+        {
+            "ncf_type": "neumf",
+            "gmf_embedding_dim": 8,
+            "mlp_embedding_dim": 8,
+            "mlp_layers": [16, 8],
+            "dropout": 0.1,
+            "learning_rate": 0.01,
+            "epochs": 3,
+            "batch_size": 32,
+            "random_state": 42,
+        },
+    ),
+    _embedding_method(
+        "two_tower_universal",
+        "two_tower",
+        {
+            "user_embedding_dim": 16,
+            "item_embedding_dim": 16,
+            "final_embedding_dim": 8,
+            "user_tower_hidden_dim1": 32,
+            "item_tower_hidden_dim1": 32,
+            "epochs": 3,
+            "batch_size": 32,
+            "random_state": 42,
+        },
+    ),
+    _embedding_method(
+        "dcn_universal",
+        "deep_cross_network",
+        {
+            "embedding_dim": 16,
+            "num_cross_layers": 2,
+            "deep_hidden_dim1": 32,
+            "epochs": 3,
+            "batch_size": 32,
+            "random_state": 42,
+        },
+    ),
+    _embedding_method(
+        "nfm_universal",
+        "neural_factorization",
+        {"embedding_dim": 16, "mlp_hidden_dim1": 32, "epochs": 3, "batch_size": 32, "random_state": 42},
+    ),
 ]
 
 _AUTO_SWEEPS: dict[str, list[dict[str, Any]]] = {
@@ -215,6 +243,285 @@ def _read(path: str | None) -> pd.DataFrame:
     if not path or not os.path.exists(path):
         return pd.DataFrame()
     return pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
+
+
+# ---------------------------------------------------------------------------
+# Data-aware sweep selection
+#
+# The static `_AUTO_SWEEPS` table answers "what methods exist for this
+# contract"; the helpers below answer "which of those make sense for THIS
+# specific dataset, sized appropriately." Two stages:
+#
+#   1. _filter_by_profile(method, profile) -> bool
+#      drops methods that are wrong for the data shape (e.g. embedding
+#      models on <5K rows where they can't beat XGBoost; CF / MF on dense
+#      data where collaborative signal doesn't help).
+#
+#   2. _resize_for_data_scale(method, profile) -> method
+#      scales hyperparameters to the data tier — small data gets fewer
+#      epochs / smaller embeddings, large data gets more.
+#
+# Both stages read a profile dict produced by `_profile_bundle`, which is
+# computed cheaply from the bundle's source CSVs at sweep time. No
+# create_datasets / split_data API change required.
+#
+# Threshold values are heuristic defaults chosen to be sensible across
+# common recsys workloads — they should be tuned on real workload data
+# over time. See the SCALE_TIERS table below; comments explain each rule.
+# ---------------------------------------------------------------------------
+
+
+def _profile_bundle(bundle) -> dict[str, Any]:
+    """Cheap profile from the bundle's interactions / users / items source
+    files. Returns a dict the filter+resize pipeline can read.
+
+    Computed live (not cached on the bundle) because:
+    - it's fast (one CSV read + a few groupbys on data the user already
+      handed us),
+    - keeping it stateless avoids cache-invalidation bugs when split_data
+      mutates source_paths in place.
+    """
+    df = _read(bundle.source_paths.get("interactions"))
+    if df.empty:
+        return {
+            "n_rows": 0,
+            "sparsity": None,
+            "target_type": None,
+            "has_timestamps": False,
+            "has_user_features": False,
+            "has_item_features": False,
+        }
+
+    n_rows = int(len(df))
+
+    sparsity: float | None = None
+    if "USER_ID" in df.columns and "ITEM_ID" in df.columns:
+        n_users = int(df["USER_ID"].nunique())
+        n_items = int(df["ITEM_ID"].nunique())
+        if n_users > 0 and n_items > 0:
+            sparsity = 1.0 - (n_rows / (n_users * n_items))
+
+    target_type: str | None = None
+    if "OUTCOME" in df.columns:
+        non_null = df["OUTCOME"].dropna()
+        n_unique = int(non_null.nunique())
+        if n_unique <= 1:
+            target_type = "constant"
+        elif set(non_null.unique()).issubset({0, 1, 0.0, 1.0}):
+            target_type = "binary"
+        else:
+            target_type = "continuous"
+
+    has_timestamps = "TIMESTAMP" in df.columns
+
+    # Side-feature signals: "has features beyond the canonical ID column".
+    # bundle.users having any column other than USER_ID counts as user
+    # features; same for items. We count via the underlying DataFrames
+    # since that's what the scorers actually consume.
+    has_user_features = False
+    if bundle.users is not None:
+        users_path = bundle.source_paths.get("users")
+        users_df = _read(users_path) if users_path else pd.DataFrame()
+        has_user_features = bool(set(users_df.columns) - {"USER_ID"})
+
+    has_item_features = False
+    if bundle.items is not None:
+        items_path = bundle.source_paths.get("items")
+        items_df = _read(items_path) if items_path else pd.DataFrame()
+        has_item_features = bool(set(items_df.columns) - {"ITEM_ID"})
+
+    return {
+        "n_rows": n_rows,
+        "sparsity": sparsity,
+        "target_type": target_type,
+        "has_timestamps": has_timestamps,
+        "has_user_features": has_user_features,
+        "has_item_features": has_item_features,
+    }
+
+
+# Data-scale tiers — one knob (n_rows) drives multiple hyperparameters.
+# Embeddings need data to train; XGBoost saturates faster but benefits from
+# more trees on large data. Cutoffs are heuristic; tune on real workloads.
+_SCALE_TIERS = [
+    {
+        "max_rows": 5_000,
+        "name": "tiny",
+        "epochs": 2,
+        "embedding_dim": 8,
+        "n_factors": 8,
+        "xgb_n_estimators": 30,
+        "xgb_max_depth": 3,
+    },
+    {
+        "max_rows": 100_000,
+        "name": "small",
+        "epochs": 5,
+        "embedding_dim": 16,
+        "n_factors": 16,
+        "xgb_n_estimators": 100,
+        "xgb_max_depth": 5,
+    },
+    {
+        "max_rows": 1_000_000,
+        "name": "medium",
+        "epochs": 10,
+        "embedding_dim": 32,
+        "n_factors": 32,
+        "xgb_n_estimators": 200,
+        "xgb_max_depth": 6,
+    },
+    {
+        "max_rows": float("inf"),
+        "name": "large",
+        "epochs": 20,
+        "embedding_dim": 64,
+        "n_factors": 64,
+        "xgb_n_estimators": 300,
+        "xgb_max_depth": 8,
+    },
+]
+
+
+def _scale_tier(n_rows: int) -> dict[str, Any]:
+    for tier in _SCALE_TIERS:
+        if n_rows < tier["max_rows"]:
+            return tier
+    return _SCALE_TIERS[-1]
+
+
+def _filter_by_profile(method: dict[str, Any], profile: dict[str, Any]) -> tuple[bool, str | None]:
+    """Decide whether to keep a method given the data profile.
+    Returns (keep, reason_if_dropped).
+
+    Rules per family:
+    - **xgb_*** : always keep — safe baseline at every scale.
+    - **mf_universal** : keep if sparsity > 0.95 and n_rows >= 1000. MF
+      shines in the classic CF regime; on dense data the collaborative
+      signal collapses, on tiny data ALS can't factorize stably.
+    - **ncf / two_tower / dcn / nfm** : keep if n_rows >= 5000. Deep
+      models with thousands of parameters need enough rows to train
+      meaningfully; XGBoost dominates below that.
+    - **two_tower** additionally requires has_user_features OR
+      has_item_features — its whole point is feature towers.
+    - **dcn / nfm** also benefit from features but can run without; we
+      keep the n_rows floor only.
+    - **sasrec_sequential** : keep if has_timestamps AND n_rows >= 1000.
+      Sequential models are data-efficient but need the timestamp signal.
+    - **continuous target** : drop classification configs across the board
+      (the resize step swaps regression in for the kept XGBoost entries).
+    """
+    short = method.get("short_name", "")
+    n_rows = profile.get("n_rows", 0) or 0
+    target_type = profile.get("target_type")
+
+    if target_type == "continuous":
+        # For now only XGBoost has a clean regression swap; embedding /
+        # sequential families would need outcome_type adjustments per class.
+        if "xgb" not in short:
+            return False, f"target is continuous; {short} doesn't auto-swap to regression"
+
+    if "mf" in short and "_universal" in short:
+        sparsity = profile.get("sparsity")
+        if sparsity is None or sparsity < 0.95:
+            return False, f"MF needs sparsity ≥ 0.95 (CF regime); got {sparsity}"
+        if n_rows < 1_000:
+            return False, f"MF needs n_rows ≥ 1000 to factorize stably; got {n_rows}"
+        return True, None
+
+    if any(family in short for family in ("ncf", "two_tower", "dcn", "nfm")):
+        if n_rows < 5_000:
+            return False, f"{short} needs n_rows ≥ 5000 to beat XGBoost; got {n_rows}"
+        if "two_tower" in short:
+            if not (profile.get("has_user_features") or profile.get("has_item_features")):
+                return False, "Two-Tower needs user OR item features"
+        return True, None
+
+    if "sasrec" in short:
+        if not profile.get("has_timestamps"):
+            return False, "SASRec needs TIMESTAMP column"
+        if n_rows < 1_000:
+            return False, f"SASRec needs n_rows ≥ 1000; got {n_rows}"
+        return True, None
+
+    return True, None  # XGBoost variants and unknown methods default to keep
+
+
+def _resize_for_data_scale(method: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of `method` with hyperparameters scaled to the data
+    tier picked by `_scale_tier(n_rows)`. The original method is not mutated.
+
+    Rules per estimator family:
+    - **tabular xgboost** : tier sets n_estimators, max_depth, ml_task
+      (classification → regression for continuous targets).
+    - **embedding (matrix_factorization)** : tier sets n_factors, epochs.
+    - **embedding (ncf / dcn / nfm)** : tier sets embedding_dim, epochs.
+    - **embedding (two_tower)** : tier sets user/item/final_embedding_dim,
+      epochs.
+    - **sequential (sasrec / hrnn)** : tier sets hidden_units, max_len,
+      epochs.
+    """
+    import copy
+
+    new = copy.deepcopy(method)
+    n_rows = profile.get("n_rows", 0) or 0
+    tier = _scale_tier(n_rows)
+    target_type = profile.get("target_type")
+    short = new.get("short_name", "")
+    estimator_config = new.get("estimator_config", {})
+
+    if "xgboost" in estimator_config:
+        if target_type == "continuous":
+            estimator_config["ml_task"] = "regression"
+        estimator_config["xgboost"]["n_estimators"] = tier["xgb_n_estimators"]
+        estimator_config["xgboost"]["max_depth"] = tier["xgb_max_depth"]
+
+    embedding = estimator_config.get("embedding", {})
+    if embedding:
+        params = embedding.setdefault("params", {})
+        model_type = embedding.get("model_type")
+        if model_type == "matrix_factorization":
+            params["n_factors"] = tier["n_factors"]
+            params["epochs"] = tier["epochs"]
+        elif model_type == "ncf":
+            params["gmf_embedding_dim"] = tier["embedding_dim"] // 2 or 4
+            params["mlp_embedding_dim"] = tier["embedding_dim"] // 2 or 4
+            params["epochs"] = tier["epochs"]
+        elif model_type == "two_tower":
+            params["user_embedding_dim"] = tier["embedding_dim"]
+            params["item_embedding_dim"] = tier["embedding_dim"]
+            params["final_embedding_dim"] = max(tier["embedding_dim"] // 2, 4)
+            params["epochs"] = tier["epochs"]
+        elif model_type in ("deep_cross_network", "neural_factorization"):
+            params["embedding_dim"] = tier["embedding_dim"]
+            params["epochs"] = tier["epochs"]
+
+    sequential = estimator_config.get("sequential", {})
+    if sequential:
+        params = sequential.setdefault("params", {})
+        # Sequential keeps a tighter lid on hidden_units to control torch
+        # memory; max_len and epochs scale with the tier.
+        params["hidden_units"] = max(tier["embedding_dim"] // 2, 8)
+        params["max_len"] = max(min(tier["embedding_dim"] // 2, 50), 10)
+        params["epochs"] = max(tier["epochs"], 2)
+
+    new["short_name"] = f"{short}_{tier['name']}" if not short.endswith(tier["name"]) else short
+    return new
+
+
+def _data_aware_methods(
+    method_list: list[dict[str, Any]], profile: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply filter then resize. Returns (kept_methods, dropped_with_reason)."""
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for method in method_list:
+        keep, reason = _filter_by_profile(method, profile)
+        if not keep:
+            dropped.append({"method": dict(method), "reason": reason})
+            continue
+        kept.append(_resize_for_data_scale(method, profile))
+    return kept, dropped
 
 
 def _detect_bundle_contract(bundle) -> str:
@@ -324,10 +631,7 @@ def _is_compatible(method: dict[str, Any]) -> tuple[bool, str | None]:
     if est_set is None:
         return False, f"scorer_type '{scorer}' not in capability matrix."
     if est not in est_set:
-        return False, (
-            f"scorer '{scorer}' does not accept estimator family '{est}' "
-            f"(allowed: {sorted(est_set)})."
-        )
+        return False, (f"scorer '{scorer}' does not accept estimator family '{est}' (allowed: {sorted(est_set)}).")
     return True, None
 
 
@@ -354,7 +658,8 @@ def _config_canonical(method: dict[str, Any]) -> dict[str, Any]:
 def _config_hash(bundle_id: str, method: dict[str, Any]) -> str:
     canonical = json.dumps(
         {"bundle_id": bundle_id, "method": _config_canonical(method)},
-        sort_keys=True, default=str,
+        sort_keys=True,
+        default=str,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -576,14 +881,37 @@ def _sweep_methods(
             }
         )
 
+    data_aware_dropped: list[dict[str, Any]] = []
     if isinstance(methods, str) and methods == "auto":
-        method_list = list(_AUTO_SWEEPS.get(contract, []))
-        if not method_list:
+        # Data-aware: filter the static auto-sweep table by the bundle's
+        # actual data profile, then resize hyperparameters to the data tier.
+        # Falls back to the unfiltered/unsized list if the profile comes
+        # back empty (e.g. a malformed bundle); we'd rather try too many
+        # methods than zero.
+        raw_methods = list(_AUTO_SWEEPS.get(contract, []))
+        if not raw_methods:
             return err(
                 "AutoSweepUnavailable",
                 f"No auto sweep is defined for contract shape '{contract}'. "
-                f"Pass an explicit `methods` list or change `methods=\"broad\"`.",
+                f'Pass an explicit `methods` list or change `methods="broad"`.',
             )
+        profile = _profile_bundle(bundle)
+        if profile.get("n_rows", 0) > 0:
+            method_list, data_aware_dropped = _data_aware_methods(raw_methods, profile)
+            if not method_list:
+                return err(
+                    "AutoSweepEmptyAfterFilter",
+                    (
+                        f"All {len(raw_methods)} auto-sweep candidates were filtered out "
+                        f"by the data profile (n_rows={profile['n_rows']}, "
+                        f"sparsity={profile['sparsity']}, target={profile['target_type']}). "
+                        f"Use methods='all' to override the filter, or pass an explicit list."
+                    ),
+                    hint="Profile signals don't match any auto-sweep entry's keep rule.",
+                    category="auto_sweep_empty_after_filter",
+                )
+        else:
+            method_list = raw_methods
     elif isinstance(methods, str) and methods == "all":
         # Convenience: run every entry from the contract's auto-sweep.
         # Different from "broad" — auto is curated, broad is exhaustive
@@ -620,8 +948,7 @@ def _sweep_methods(
     else:
         return err(
             "ArgumentError",
-            "methods must be 'auto', 'all', 'broad', 'list', or an explicit "
-            "list of method dicts / short_names.",
+            "methods must be 'auto', 'all', 'broad', 'list', or an explicit list of method dicts / short_names.",
         )
 
     runnable, dropped = _filter_by_capability(method_list)
@@ -741,6 +1068,8 @@ def _sweep_methods(
         "n_runnable": len(runnable),
         "n_dropped_incompatible": len(dropped),
         "dropped_methods": dropped,
+        "n_dropped_by_data_profile": len(data_aware_dropped),
+        "dropped_by_data_profile": data_aware_dropped,
         "leaderboard": leaderboard,
         "winner": leaderboard[0] if leaderboard and leaderboard[0]["status"] in ("ok", "cached") else None,
     }

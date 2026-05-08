@@ -124,8 +124,7 @@ def _op_aggregate_to_sequences(
 ) -> pd.DataFrame:
     if timestamp_col is None or timestamp_col not in df.columns:
         raise ValueError(
-            "aggregate_to_sequences requires a timestamp_col present in the data; "
-            "sequence ordering must not be silent."
+            "aggregate_to_sequences requires a timestamp_col present in the data; sequence ordering must not be silent."
         )
     sorted_df = df.sort_values([user_col, timestamp_col])
     agg: dict[str, Any] = {item_col: list}
@@ -229,8 +228,7 @@ def _detect_source_shape(
 
 
 def _to_long_interactions(
-    df, user_id_column, item_id_column, outcome_column,
-    target_columns=None, target_rename_pattern=None, **_
+    df, user_id_column, item_id_column, outcome_column, target_columns=None, target_rename_pattern=None, **_
 ):
     """Long-format reshape. Two source paths:
 
@@ -245,9 +243,7 @@ def _to_long_interactions(
             rx = re.compile(target_rename_pattern)
             target_columns = [c for c in df.columns if rx.fullmatch(c)]
             if not target_columns:
-                raise ValueError(
-                    f"target_rename_pattern '{target_rename_pattern}' matched no columns."
-                )
+                raise ValueError(f"target_rename_pattern '{target_rename_pattern}' matched no columns.")
         df = _op_melt_to_long(df, user_col, target_columns)
         df = _op_cast_dtypes(df, {"USER_ID": "str", "ITEM_ID": "str", "OUTCOME": "float"})
         return df, ["melt_to_long", "cast_dtypes"]
@@ -265,27 +261,28 @@ def _to_long_interactions(
     return df, ["rename_columns", "cast_dtypes"]
 
 
-def _to_long_with_timestamp(
-    df, user_id_column, item_id_column, outcome_column, timestamp_column, **_
-):
+def _to_long_with_timestamp(df, user_id_column, item_id_column, outcome_column, timestamp_column, **_):
     if timestamp_column is None:
         raise ValueError("long_with_timestamp requires timestamp_column.")
     df, ops = _to_long_interactions(
-        df, user_id_column, item_id_column, outcome_column,
+        df,
+        user_id_column,
+        item_id_column,
+        outcome_column,
     )
     df = _op_parse_timestamp(df, timestamp_column)
     ops.append("parse_timestamp")
     return df, ops
 
 
-def _to_long_multi_reward(
-    df, user_id_column, item_id_column, outcome_column,
-    auxiliary_outcome_columns, **_
-):
+def _to_long_multi_reward(df, user_id_column, item_id_column, outcome_column, auxiliary_outcome_columns, **_):
     df, ops = _to_long_interactions(df, user_id_column, item_id_column, outcome_column)
     if auxiliary_outcome_columns:
-        rename = {c: f"OUTCOME_{c}" if not c.startswith("OUTCOME_") else c
-                  for c in auxiliary_outcome_columns if c in df.columns}
+        rename = {
+            c: f"OUTCOME_{c}" if not c.startswith("OUTCOME_") else c
+            for c in auxiliary_outcome_columns
+            if c in df.columns
+        }
         df = _op_rename_columns(df, rename)
         for c in df.columns:
             if c.startswith("OUTCOME_"):
@@ -295,8 +292,7 @@ def _to_long_multi_reward(
 
 
 def _to_wide_multioutput(
-    df, user_id_column, item_id_column, outcome_column,
-    target_columns, target_rename_pattern, dedupe_user_id, **_
+    df, user_id_column, item_id_column, outcome_column, target_columns, target_rename_pattern, dedupe_user_id, **_
 ):
     ops: list[str] = []
     user_col = user_id_column or "USER_ID"
@@ -352,17 +348,17 @@ def _to_multiclass(df, user_id_column, item_id_column, dedupe_user_id, **_):
     return df, ["rename_columns", "cast_dtypes", "drop_outcome", "dedupe_user_id"]
 
 
-def _to_prebuilt_sequences(
-    df, user_id_column, item_id_column, outcome_column, timestamp_column, **_
-):
+def _to_prebuilt_sequences(df, user_id_column, item_id_column, outcome_column, timestamp_column, **_):
     user_col = user_id_column or "USER_ID"
     item_col = item_id_column or "ITEM_ID"
     if user_col not in df.columns or item_col not in df.columns:
-        raise ValueError(
-            f"prebuilt_sequences requires {user_col} and {item_col} columns in the source."
-        )
+        raise ValueError(f"prebuilt_sequences requires {user_col} and {item_col} columns in the source.")
     df = _op_aggregate_to_sequences(
-        df, user_col, item_col, outcome_column, timestamp_column,
+        df,
+        user_col,
+        item_col,
+        outcome_column,
+        timestamp_column,
     )
     return df, ["aggregate_to_sequences"]
 

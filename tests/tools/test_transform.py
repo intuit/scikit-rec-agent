@@ -7,8 +7,6 @@ training is invoked here.
 
 from __future__ import annotations
 
-import os
-
 import pandas as pd
 import pytest
 
@@ -25,7 +23,6 @@ from scikit_rec_agent.tools.transform import (
     _op_pivot_to_wide,
     _validate_against_contract,
 )
-
 
 # ---------------------------------------------------------------------------
 # Per-op unit tests

@@ -133,19 +133,12 @@ def _build_eval_kwargs_from_validation(session, handle) -> dict[str, Any]:
         if TIMESTAMP_COL in df.columns:
             sort_cols.append(TIMESTAMP_COL)
         df_sorted = df.sort_values(sort_cols)
-        grouped = (
-            df_sorted.groupby(USER_ID_NAME, sort=False)
-            .agg({ITEM_ID_NAME: list, LABEL_NAME: list})
-            .reset_index()
-        )
+        grouped = df_sorted.groupby(USER_ID_NAME, sort=False).agg({ITEM_ID_NAME: list, LABEL_NAME: list}).reset_index()
         if grouped.empty:
             return {}
         max_len = int(grouped[ITEM_ID_NAME].apply(len).max())
         items = np.array(
-            [
-                [str(x) for x in row] + [""] * (max_len - len(row))
-                for row in grouped[ITEM_ID_NAME]
-            ],
+            [[str(x) for x in row] + [""] * (max_len - len(row)) for row in grouped[ITEM_ID_NAME]],
             dtype=object,
         )
         rewards = np.array(

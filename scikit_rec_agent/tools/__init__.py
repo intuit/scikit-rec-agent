@@ -60,6 +60,7 @@ def err(
 def _collect_default_tools() -> list[Tool]:
     """Lazy import so optional extras don't eagerly require scikit-rec at import."""
     from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.diagnose import TOOL_DIAGNOSE_TRAINING_FAILURE
     from scikit_rec_agent.tools.evaluation import TOOL_COMPARE_MODELS, TOOL_EVALUATE_MODEL
     from scikit_rec_agent.tools.hpo import TOOL_RUN_HPO
     from scikit_rec_agent.tools.profiling import TOOL_PROFILE_DATA, TOOL_VALIDATE_DATA
@@ -68,7 +69,6 @@ def _collect_default_tools() -> list[Tool]:
         TOOL_LOAD_MODEL,
         TOOL_SAVE_MODEL,
     )
-    from scikit_rec_agent.tools.diagnose import TOOL_DIAGNOSE_TRAINING_FAILURE
     from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
     from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
     from scikit_rec_agent.tools.training import TOOL_TRAIN_MODEL

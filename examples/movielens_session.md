@@ -1,6 +1,6 @@
 # MovieLens-1M session — captured transcript
 
-_Captured 2026-05-08 02:58 PDT via `private/run_movielens_session.py` against the IntuitLLM gateway (model=gpt-4o-mini-2024-07-18-oai)._
+_Captured 2026-05-08 03:16 PDT via `private/run_movielens_session.py` against the IntuitLLM gateway (model=gpt-4o-mini-2024-07-18-oai)._
 
 _Sample data: 300 random users from `data/raw/ratings.dat` (MovieLens-1M, binarised at rating ≥ 4)._
 
@@ -329,6 +329,16 @@ and recommend a winner.
 })
 ```
 
+
+```
+[tool_call] create_datasets({
+  "bundle_id": "ml1m_bundle",
+  "interactions_path": "/tmp/ml1m_interactions_transformed.csv",
+  "users_path": "/tmp/ml1m_users.csv",
+  "items_path": "/tmp/ml1m_items.csv"
+})
+```
+
 ```
 [tool_result:ok]
 {
@@ -369,18 +379,23 @@ and recommend a winner.
 }
 ```
 
+```
+[tool_result:error]
+{
+  "error_type": "ValueError",
+  "message": "Client Schema does not conform to Required Schema",
+  "hint": null,
+  "category": null
+}
+```
+
 
 ```
 [tool_call] transform_data({
   "file_path": "/tmp/ml1m_users.csv",
   "output_path": "/tmp/ml1m_users_transformed.csv",
   "target_contract": "users_features",
-  "user_id_column": "userid",
-  "feature_columns": [
-    "gender",
-    "age",
-    "occupation"
-  ]
+  "user_id_column": "userid"
 })
 ```
 
@@ -390,10 +405,7 @@ and recommend a winner.
   "file_path": "/tmp/ml1m_items.csv",
   "output_path": "/tmp/ml1m_items_transformed.csv",
   "target_contract": "items_features",
-  "item_id_column": "movieid",
-  "feature_columns": [
-    "n_genres"
-  ]
+  "item_id_column": "movieid"
 })
 ```
 
@@ -406,8 +418,7 @@ and recommend a winner.
   "ops_applied": [
     "rename_user_id",
     "cast_dtypes",
-    "dedupe_user_id",
-    "select_features"
+    "dedupe_user_id"
   ],
   "columns": [
     "USER_ID",
@@ -432,8 +443,7 @@ and recommend a winner.
   "ops_applied": [
     "rename_item_id",
     "cast_dtypes",
-    "dedupe_item_id",
-    "select_features"
+    "dedupe_item_id"
   ],
   "columns": [
     "ITEM_ID",
@@ -463,9 +473,9 @@ and recommend a winner.
   "bundle_id": "ml1m_bundle",
   "dataset_type": "interactions",
   "schema_paths": {
-    "interactions": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_ml1m_bundle_c0_fddmb/interactions_schema.yaml",
-    "users": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_ml1m_bundle_c0_fddmb/users_schema.yaml",
-    "items": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_ml1m_bundle_c0_fddmb/items_schema.yaml"
+    "interactions": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_ml1m_bundle_cip16ctn/interactions_schema.yaml",
+    "users": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_ml1m_bundle_cip16ctn/users_schema.yaml",
+    "items": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_ml1m_bundle_cip16ctn/items_schema.yaml"
   },
   "columns": [
     "USER_ID",
@@ -499,8 +509,8 @@ and recommend a winner.
   "valid_rows": 9209,
   "test_rows": 0,
   "paths": {
-    "train": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_split_ml1m_bundle_7hj1lg23/train.csv",
-    "valid": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_split_ml1m_bundle_7hj1lg23/valid.csv",
+    "train": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_split_ml1m_bundle_8aq0io21/train.csv",
+    "valid": "/var/folders/3b/pjpj9w4939j9cmn303gsmtl00000gr/T/skragent_split_ml1m_bundle_8aq0io21/valid.csv",
     "test": null
   },
   "info": {
@@ -544,6 +554,8 @@ and recommend a winner.
   "n_runnable": 7,
   "n_dropped_incompatible": 0,
   "dropped_methods": [],
+  "n_dropped_by_data_profile": 0,
+  "dropped_by_data_profile": [],
   "leaderboard": [
     {
       "method": {
@@ -778,15 +790,15 @@ The evaluation of the MovieLens-1M dataset has been completed, and here are the 
 
 | Method                     | NDCG@10          | Precision@10     |
 |----------------------------|------------------|------------------|
-| sasrec_sequential          | 0.0213           | 0.0256           |
-| nfm_universal              | 0.0079           | 0.0014           |
-| dcn_universal              | 0.0051           | 0.0010           |
-| xgb_universal              | 0.0026           | 0.0006           |
-| two_tower_universal        | 0.0017           | 0.0004           |
-| mf_universal               | 0.0009           | 0.0002           |
-| ncf_universal              | 0.0006           | 0.0001           |
+| SASRec (Sequential)        | 0.0213           | 0.0256           |
+| Neural Factorization (NFM) | 0.0079           | 0.0014           |
+| Deep Cross Network (DCN)   | 0.0051           | 0.0010           |
+| XGBoost                    | 0.0026           | 0.0006           |
+| Two-Tower                  | 0.0017           | 0.0004           |
+| Matrix Factorization (MF)  | 0.0009           | 0.0002           |
+| Neural Collaborative Filtering (NCF) | 0.0006 | 0.0001           |
 
-The best performing model is **sasrec_sequential**, achieving an NDCG@10 of **0.0213** and a Precision@10 of **0.0256**. This model utilizes a sequential approach, which is suitable given the presence of timestamps in the data.
+The best performing model is **SASRec (Sequential)** with an NDCG@10 of **0.0213** and a Precision@10 of **0.0256**. This model effectively captures the sequential nature of user interactions, making it the recommended choice for predicting which movies a user is likely to click on.
 
 If you would like to proceed with saving this model or further actions, please let me know!
 
@@ -795,4 +807,4 @@ _(turn ended: end_turn)_
 
 ---
 
-_Total turn duration: 250.8s_
+_Total turn duration: 256.8s_

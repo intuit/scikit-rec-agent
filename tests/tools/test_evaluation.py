@@ -106,10 +106,11 @@ def test_eval_kwargs_per_user_shape_for_sequential_recommender(tmp_path, session
     because the helper produced per-row arrays. Verified here with a fake
     sequential handle so the test runs in milliseconds without torch."""
     import pandas as pd
+
     from scikit_rec_agent.session import ModelHandle
     from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
-    from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
     from scikit_rec_agent.tools.evaluation import _build_eval_kwargs_from_validation
+    from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
 
     # Build a small long-with-timestamp bundle so _build_eval_kwargs_from_validation
     # has real validation data to aggregate over.
@@ -125,8 +126,11 @@ def test_eval_kwargs_per_user_shape_for_sequential_recommender(tmp_path, session
     df.to_csv(p, index=False)
     TOOL_CREATE_DATASETS.fn(bundle_id="b", interactions_path=str(p), session=session)
     TOOL_SPLIT_DATA.fn(
-        bundle_id="b", strategy="random_split", valid_fraction=0.4,
-        session=session, random_state=1,
+        bundle_id="b",
+        strategy="random_split",
+        valid_fraction=0.4,
+        session=session,
+        random_state=1,
     )
 
     # Stand up a fake recommender that subclasses SequentialRecommender so
@@ -191,8 +195,8 @@ def test_score_items_kwargs_omits_users_for_embedding_estimator(binary_reward_pa
     (Batch Mode in BaseEmbeddingEstimator.predict_proba). Our eval helper
     must NOT pass `users` for them — the universal scorer otherwise rejects
     the call with `users DataFrame must contain 'EMBEDDING' column`."""
-    from scikit_rec_agent.tools.evaluation import _build_score_items_kwargs
     from scikit_rec_agent.session import ModelHandle
+    from scikit_rec_agent.tools.evaluation import _build_score_items_kwargs
 
     TOOL_CREATE_DATASETS.fn(
         bundle_id="b",
@@ -223,8 +227,7 @@ def test_score_items_kwargs_omits_users_for_embedding_estimator(binary_reward_pa
     kwargs = _build_score_items_kwargs(session, handle)
     assert "interactions" in kwargs
     assert "users" not in kwargs, (
-        "users DataFrame must NOT be passed for embedding estimators — "
-        "they self-supply embeddings in batch mode."
+        "users DataFrame must NOT be passed for embedding estimators — they self-supply embeddings in batch mode."
     )
 
 
@@ -259,8 +262,11 @@ def test_evaluate_wide_bundle_returns_structured_error(tmp_path, session):
     df.to_csv(p, index=False)
     TOOL_CREATE_DATASETS.fn(bundle_id="wide", interactions_path=str(p), session=session)
     TOOL_SPLIT_DATA.fn(
-        bundle_id="wide", strategy="leave_n_users_out",
-        n_valid_users=4, session=session, random_state=1,
+        bundle_id="wide",
+        strategy="leave_n_users_out",
+        n_valid_users=4,
+        session=session,
+        random_state=1,
     )
 
     # Stick a fake handle on the session so evaluate_model has something to look up.

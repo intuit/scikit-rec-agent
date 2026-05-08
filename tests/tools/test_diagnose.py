@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import pandas as pd
-
-from scikit_rec_agent.session import FailureRecord, Session
 from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
 from scikit_rec_agent.tools.diagnose import (
     TOOL_DIAGNOSE_TRAINING_FAILURE,
-    Diagnosis,
     Fix,
     _apply_fix,
     _match,
@@ -16,7 +12,6 @@ from scikit_rec_agent.tools.diagnose import (
     record_failure,
 )
 from scikit_rec_agent.tools.training import TOOL_TRAIN_MODEL
-
 
 # ---------------------------------------------------------------------------
 # Pattern matcher: one test per registered failure class
@@ -123,7 +118,11 @@ def test_match_dtype_mismatch_across_files():
 def test_match_evaluator_needs_eval_kwargs():
     env = {
         "error_type": "ValueError",
-        "message": "evaluate failed for NDCG_at_k@10: eval_kwargs is required to compute modified rewards. Provide logged_items, logged_rewards, and any other required arguments.",
+        "message": (
+            "evaluate failed for NDCG_at_k@10: eval_kwargs is required to compute "
+            "modified rewards. Provide logged_items, logged_rewards, and any other "
+            "required arguments."
+        ),
     }
     d = _match(env)
     assert d.category == "evaluator_needs_eval_kwargs"
@@ -135,7 +134,9 @@ def test_match_evaluator_needs_eval_kwargs():
 def test_match_logged_items_shape_mismatch():
     env = {
         "error_type": "ValueError",
-        "message": "evaluate failed for NDCG_at_k@10: Mismatch in N dimension: target_proba (9209) vs logged_items (88)",
+        "message": (
+            "evaluate failed for NDCG_at_k@10: Mismatch in N dimension: target_proba (9209) vs logged_items (88)"
+        ),
     }
     d = _match(env)
     assert d.category == "logged_items_shape_mismatch"
@@ -207,9 +208,7 @@ def test_unknown_category_surfaces_raw_and_no_auto_retry(session):
         envelope=env,
         diagnosis=diagnosis,
     )
-    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(
-        model_name="m", auto_retry=True, session=session
-    )
+    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(model_name="m", auto_retry=True, session=session)
     assert res["status"] == "ok"
     assert res["data"]["category"] == "unknown"
     assert res["data"]["auto_retried"] is False
@@ -230,15 +229,11 @@ def test_retry_cap_blocks_after_max_retries(session):
     }
     # Simulate two retries already applied for this model_name.
     for _ in range(2):
-        rec = record_failure(
-            session, "m", config, {"bundle_id": "b"}, env, _match(env)
-        )
+        rec = record_failure(session, "m", config, {"bundle_id": "b"}, env, _match(env))
         rec.fix_applied = {"description": "tried something", "action": {"type": "noop"}}
     # Now record a fresh failure with no fix_applied:
     record_failure(session, "m", config, {"bundle_id": "b"}, env, _match(env))
-    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(
-        model_name="m", auto_retry=True, max_retries=2, session=session
-    )
+    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(model_name="m", auto_retry=True, max_retries=2, session=session)
     assert res["status"] == "ok"
     assert res["data"]["auto_retried"] is False
     assert "max_retries" in res["data"].get("retry_blocked_reason", "")
@@ -253,9 +248,7 @@ def test_missing_dependency_no_auto_retryable(session):
     env = {"error_type": "ModuleNotFoundError", "message": "No module named 'torch'"}
     config = {"recommender_type": "ranking", "scorer_type": "universal"}
     record_failure(session, "m", config, {"bundle_id": "b"}, env, _match(env))
-    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(
-        model_name="m", auto_retry=True, session=session
-    )
+    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(model_name="m", auto_retry=True, session=session)
     assert res["status"] == "ok"
     assert res["data"]["auto_retried"] is False
     blocked = res["data"].get("retry_blocked_reason", "")
@@ -312,9 +305,7 @@ def test_train_model_records_failure_with_category(binary_reward_paths, session)
         "scorer_type": "universal",
         "estimator_config": {"ml_task": "classification"},
     }
-    result = TOOL_TRAIN_MODEL.fn(
-        model_name="bad", config=bad_config, bundle_id="b", session=session
-    )
+    result = TOOL_TRAIN_MODEL.fn(model_name="bad", config=bad_config, bundle_id="b", session=session)
     assert result["status"] == "error"
     # Envelope carries the new fields
     assert "category" in result
@@ -345,9 +336,7 @@ def test_previously_attempted_fix_is_filtered(session):
     # Second failure with same pattern
     record_failure(session, "m", config, {"bundle_id": "b"}, env, _match(env))
 
-    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(
-        model_name="m", auto_retry=False, session=session
-    )
+    res = TOOL_DIAGNOSE_TRAINING_FAILURE.fn(model_name="m", auto_retry=False, session=session)
     assert res["status"] == "ok"
     desc_set = {f["description"] for f in res["data"]["candidate_fixes"]}
     assert nan_fix.description not in desc_set

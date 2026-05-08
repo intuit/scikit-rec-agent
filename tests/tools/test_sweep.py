@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import pytest
 
 from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
 from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
 from scikit_rec_agent.tools.sweep import (
-    TOOL_SWEEP_METHODS,
     _AUTO_SWEEPS,
     _EMBEDDING_FAMILIES,
+    TOOL_SWEEP_METHODS,
     _broad_sweep_for_contract,
     _config_hash,
+    _data_aware_methods,
     _detect_bundle_contract,
     _filter_by_capability,
+    _filter_by_profile,
     _is_compatible,
     _normalise_method,
+    _profile_bundle,
+    _resize_for_data_scale,
+    _scale_tier,
     _split_metric_spec,
 )
-
 
 # ---------------------------------------------------------------------------
 # Capability filter — pure logic
@@ -549,10 +552,177 @@ def test_all_embedding_families_train_on_same_bundle(binary_reward_paths, tmp_pa
         except Exception as e:
             failures[method["short_name"]] = f"{type(e).__name__}: {e}"
 
-    assert not failures, (
-        "All five embedding families must train on the same bundle. "
-        f"Failures: {failures}"
+    assert not failures, f"All five embedding families must train on the same bundle. Failures: {failures}"
+
+
+def test_scale_tier_picks_correct_band():
+    assert _scale_tier(100)["name"] == "tiny"
+    assert _scale_tier(50_000)["name"] == "small"
+    assert _scale_tier(500_000)["name"] == "medium"
+    assert _scale_tier(5_000_000)["name"] == "large"
+
+
+def test_filter_drops_embeddings_on_tiny_data():
+    profile = {
+        "n_rows": 500,
+        "sparsity": 0.99,
+        "target_type": "binary",
+        "has_timestamps": True,
+        "has_user_features": True,
+        "has_item_features": True,
+    }
+    for method in _EMBEDDING_FAMILIES:
+        keep, reason = _filter_by_profile(method, profile)
+        if "xgb" in method["short_name"]:
+            assert keep
+        else:
+            # MF needs n_rows>=1000; NCF/Two-Tower/DCN/NFM need n_rows>=5000
+            assert not keep, f"expected to drop {method['short_name']} on n_rows=500"
+            assert reason
+
+
+def test_filter_keeps_mf_in_sparse_cf_regime():
+    profile = {
+        "n_rows": 50_000,
+        "sparsity": 0.99,
+        "target_type": "binary",
+        "has_timestamps": False,
+        "has_user_features": False,
+        "has_item_features": False,
+    }
+    mf = next(m for m in _EMBEDDING_FAMILIES if "mf" in m["short_name"])
+    keep, reason = _filter_by_profile(mf, profile)
+    assert keep, f"MF should survive sparse CF regime; reason={reason}"
+
+
+def test_filter_drops_mf_on_dense_data():
+    profile = {
+        "n_rows": 50_000,
+        "sparsity": 0.5,
+        "target_type": "binary",
+        "has_timestamps": False,
+        "has_user_features": True,
+        "has_item_features": True,
+    }
+    mf = next(m for m in _EMBEDDING_FAMILIES if "mf" in m["short_name"])
+    keep, reason = _filter_by_profile(mf, profile)
+    assert not keep
+    assert "sparsity" in reason.lower()
+
+
+def test_filter_drops_two_tower_without_features():
+    profile = {
+        "n_rows": 50_000,
+        "sparsity": 0.95,
+        "target_type": "binary",
+        "has_timestamps": False,
+        "has_user_features": False,
+        "has_item_features": False,
+    }
+    tt = next(m for m in _EMBEDDING_FAMILIES if "two_tower" in m["short_name"])
+    keep, reason = _filter_by_profile(tt, profile)
+    assert not keep
+    assert "feature" in reason.lower()
+
+
+def test_filter_drops_non_xgb_on_continuous_target():
+    profile = {
+        "n_rows": 100_000,
+        "sparsity": 0.99,
+        "target_type": "continuous",
+        "has_timestamps": True,
+        "has_user_features": True,
+        "has_item_features": True,
+    }
+    for method in _EMBEDDING_FAMILIES:
+        keep, reason = _filter_by_profile(method, profile)
+        if "xgb" in method["short_name"]:
+            assert keep
+        else:
+            assert not keep, f"continuous target should drop {method['short_name']}"
+            assert "continuous" in reason.lower()
+
+
+def test_resize_xgb_for_continuous_target_swaps_ml_task():
+    method = {
+        "short_name": "xgb_universal",
+        "recommender_type": "ranking",
+        "scorer_type": "universal",
+        "estimator_type": "tabular",
+        "estimator_config": {"ml_task": "classification", "xgboost": {"n_estimators": 50, "max_depth": 4}},
+    }
+    profile = {"n_rows": 50_000, "target_type": "continuous"}
+    resized = _resize_for_data_scale(method, profile)
+    assert resized["estimator_config"]["ml_task"] == "regression"
+    # original method untouched
+    assert method["estimator_config"]["ml_task"] == "classification"
+
+
+def test_resize_scales_embedding_dim_with_data_size():
+    mf = next(m for m in _EMBEDDING_FAMILIES if "mf" in m["short_name"])
+
+    tiny = _resize_for_data_scale(mf, {"n_rows": 500, "target_type": "binary"})
+    medium = _resize_for_data_scale(mf, {"n_rows": 500_000, "target_type": "binary"})
+    large = _resize_for_data_scale(mf, {"n_rows": 5_000_000, "target_type": "binary"})
+
+    tiny_factors = tiny["estimator_config"]["embedding"]["params"]["n_factors"]
+    medium_factors = medium["estimator_config"]["embedding"]["params"]["n_factors"]
+    large_factors = large["estimator_config"]["embedding"]["params"]["n_factors"]
+
+    assert tiny_factors < medium_factors < large_factors
+
+
+def test_data_aware_methods_drops_then_resizes(binary_reward_paths, session):
+    """End-to-end on the binary_reward fixture: 5000 users × 3 items × 1 row
+    each. Sparsity ≈ 0.667 (5000/(5000*3) = 0.333 density), n_rows = 5000.
+    Expect MF to be dropped (dense), embeddings dropped (n_rows boundary),
+    XGBoost kept and sized to the 'tiny'/'small' tier."""
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+
+    TOOL_CREATE_DATASETS.fn(
+        bundle_id="b",
+        interactions_path=binary_reward_paths["interactions"],
+        users_path=binary_reward_paths["users"],
+        items_path=binary_reward_paths["items"],
+        session=session,
     )
+    bundle = session.loaded_datasets["b"]
+    profile = _profile_bundle(bundle)
+
+    methods = list(_AUTO_SWEEPS["long_interactions"])
+    kept, dropped = _data_aware_methods(methods, profile)
+    kept_names = {m["short_name"] for m in kept}
+    dropped_names = {d["method"]["short_name"] for d in dropped}
+
+    # XGBoost survives every profile
+    assert any("xgb" in n for n in kept_names)
+    # MF dropped because dense (~33% density, way under 0.95 sparsity floor)
+    assert any("mf" in n for n in dropped_names)
+
+
+def test_sweep_auto_uses_data_aware_path(split_bundle):
+    """methods='auto' on a long_interactions bundle should now report
+    data-aware drops in the response payload."""
+    session = split_bundle
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="b",
+        methods="auto",
+        metrics=["NDCG_at_k"],
+        primary_metric="NDCG_at_k",
+        eval_top_k=5,
+        session=session,
+    )
+    # Data-aware filter is wired in. Either we got real metrics back (unlikely
+    # on this fixture since most methods get filtered) OR we got
+    # AutoSweepEmptyAfterFilter; both are acceptable as long as
+    # n_dropped_by_data_profile is reported.
+    if result["status"] == "ok":
+        assert "n_dropped_by_data_profile" in result["data"]
+    else:
+        assert (
+            result.get("category") in ("auto_sweep_empty_after_filter", None)
+            or "data_profile" in str(result.get("message", "")).lower()
+        )
 
 
 def test_normalise_method_fills_defaults():

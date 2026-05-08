@@ -82,6 +82,7 @@ def test_create_datasets_auto_detects_multioutput(tmp_path, session):
     assert bundle.dataset_type == "interaction_multioutput"
     # The bundle's interactions handle is the right scikit-rec subclass.
     from skrec.dataset.interactions_dataset import InteractionMultiOutputDataset
+
     assert isinstance(bundle.interactions, InteractionMultiOutputDataset)
 
 
@@ -105,6 +106,7 @@ def test_create_datasets_auto_detects_multiclass(tmp_path, session):
     assert result["status"] == "ok", result
     assert result["data"]["dataset_type"] == "interaction_multiclass"
     from skrec.dataset.interactions_dataset import InteractionMultiClassDataset
+
     assert isinstance(session.loaded_datasets["mc"].interactions, InteractionMultiClassDataset)
 
 

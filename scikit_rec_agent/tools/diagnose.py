@@ -26,7 +26,6 @@ from typing import Any
 from scikit_rec_agent.session import FailureRecord
 from scikit_rec_agent.tools import Tool, err, ok
 
-
 # ---------------------------------------------------------------------------
 # Registry primitives
 # ---------------------------------------------------------------------------
@@ -266,13 +265,16 @@ _REGISTRY: list[FailurePattern] = [
                     "you don't need; one-hot or label-encode the ones you do. "
                     "Re-run create_datasets on the cleaned file."
                 ),
-                action={"type": "advise_user", "text": (
-                    "Look at the error message — it names the offending columns "
-                    "(e.g. 'Invalid columns: wholesale: object, acct_attached: object'). "
-                    "For each: drop it if it's not a useful feature, or convert to "
-                    "numeric (one-hot encode strings, label-encode ordered categories) "
-                    "before calling create_datasets."
-                )},
+                action={
+                    "type": "advise_user",
+                    "text": (
+                        "Look at the error message — it names the offending columns "
+                        "(e.g. 'Invalid columns: wholesale: object, acct_attached: object'). "
+                        "For each: drop it if it's not a useful feature, or convert to "
+                        "numeric (one-hot encode strings, label-encode ordered categories) "
+                        "before calling create_datasets."
+                    ),
+                },
                 auto_retryable=False,
             ),
         ],
@@ -298,11 +300,14 @@ _REGISTRY: list[FailurePattern] = [
                     "per-target arrays, or evaluate per-ITEM_* column outside "
                     "the agent and report the metrics yourself."
                 ),
-                action={"type": "advise_user", "text": (
-                    "evaluate_model on wide bundles needs explicit eval_kwargs. "
-                    "Build logged_items and logged_rewards from the bundle's "
-                    "ITEM_* columns and pass them in."
-                )},
+                action={
+                    "type": "advise_user",
+                    "text": (
+                        "evaluate_model on wide bundles needs explicit eval_kwargs. "
+                        "Build logged_items and logged_rewards from the bundle's "
+                        "ITEM_* columns and pass them in."
+                    ),
+                },
                 auto_retryable=False,
             ),
         ],
@@ -337,11 +342,14 @@ _REGISTRY: list[FailurePattern] = [
                     "logged_items, logged_rewards, and logging_proba arrays "
                     "from your logged data and pass them as eval_kwargs."
                 ),
-                action={"type": "advise_user", "text": (
-                    "These evaluators need policy logging info (logging_proba) "
-                    "you have to provide — they can't be derived from raw "
-                    "interactions alone."
-                )},
+                action={
+                    "type": "advise_user",
+                    "text": (
+                        "These evaluators need policy logging info (logging_proba) "
+                        "you have to provide — they can't be derived from raw "
+                        "interactions alone."
+                    ),
+                },
                 auto_retryable=False,
             ),
         ],
@@ -366,12 +374,15 @@ _REGISTRY: list[FailurePattern] = [
                     "_build_eval_kwargs_from_validation helper, not a user "
                     "error. File against the agent repo if you see this."
                 ),
-                action={"type": "advise_user", "text": (
-                    "Internal shape bug — please report. Workaround: pass "
-                    "eval_kwargs explicitly to evaluate_model with per-row "
-                    "logged_items of shape (N, 1) where N equals the row count "
-                    "in the bundle's validation interactions."
-                )},
+                action={
+                    "type": "advise_user",
+                    "text": (
+                        "Internal shape bug — please report. Workaround: pass "
+                        "eval_kwargs explicitly to evaluate_model with per-row "
+                        "logged_items of shape (N, 1) where N equals the row count "
+                        "in the bundle's validation interactions."
+                    ),
+                },
                 auto_retryable=False,
             ),
         ],
@@ -401,11 +412,14 @@ _REGISTRY: list[FailurePattern] = [
                     "are categorical even when they look numeric). Re-write the "
                     "files with the cast applied, then re-run create_datasets."
                 ),
-                action={"type": "advise_user", "text": (
-                    "Pick str for USER_ID and ITEM_ID across interactions, users, "
-                    "and items files. Pandas defaults to int when the IDs are all "
-                    "digits, which silently mismatches the items / users tables."
-                )},
+                action={
+                    "type": "advise_user",
+                    "text": (
+                        "Pick str for USER_ID and ITEM_ID across interactions, users, "
+                        "and items files. Pandas defaults to int when the IDs are all "
+                        "digits, which silently mismatches the items / users tables."
+                    ),
+                },
                 auto_retryable=False,
             ),
         ],
@@ -413,7 +427,9 @@ _REGISTRY: list[FailurePattern] = [
     FailurePattern(
         name="data_shape_mismatch",
         category="data_shape_mismatch",
-        pattern=re.compile(r"(Found input variables with inconsistent numbers of samples|shapes .* not aligned)", re.IGNORECASE),
+        pattern=re.compile(
+            r"(Found input variables with inconsistent numbers of samples|shapes .* not aligned)", re.IGNORECASE
+        ),
         causes=["X / y row counts disagree — usually a stale split or a join that dropped rows."],
         fixes=[
             Fix(
@@ -588,7 +604,8 @@ def _fix_signature(fix: Fix) -> str:
 def _fix_signature_dict(fix_dict: dict[str, Any]) -> str:
     return json.dumps(
         {"description": fix_dict.get("description"), "action": fix_dict.get("action")},
-        sort_keys=True, default=str,
+        sort_keys=True,
+        default=str,
     )
 
 
@@ -641,9 +658,7 @@ def _diagnose_training_failure(
 
     retry_count = _retries_for_model(session, model_name)
     if retry_count >= max_retries:
-        payload["retry_blocked_reason"] = (
-            f"max_retries={max_retries} reached for '{model_name}'."
-        )
+        payload["retry_blocked_reason"] = f"max_retries={max_retries} reached for '{model_name}'."
         return ok(payload)
 
     top_fix = next((f for f in candidate_fixes if f.auto_retryable), None)

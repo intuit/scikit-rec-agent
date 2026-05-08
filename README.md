@@ -41,9 +41,26 @@ See [`examples/`](./examples/) for:
 
 ## What it does
 
-Eleven tools cover the full scikit-rec workflow: profile data, validate schemas, build datasets, split (temporal / per-user / cold-start), train (6 recommender types × 6 scorers × 3 estimator planes), evaluate (7 evaluator types × 9 metrics), compare, run HPO (Optuna), and persist to a local model registry.
+Fourteen tools cover the full scikit-rec workflow — from raw data to a saved, tuned model:
 
-The system prompt is built at import time from scikit-rec's live enum maps, so new recommender/scorer/estimator types get picked up automatically.
+| Tool | What it does |
+|---|---|
+| `profile_data` | Loads a CSV/parquet and reports shape, dtypes, sparsity, target type, and temporal range. Heuristic role detection for USER_ID / ITEM_ID / OUTCOME / TIMESTAMP. |
+| `validate_data` | Checks a file against scikit-rec's required schema. Suggests column-rename mappings when names are close. |
+| `transform_data` | Reshapes a raw file into one of nine scikit-rec contracts (long, long-with-timestamp, long-multi-reward, wide multi-output, multiclass, prebuilt sequences, sessions, users features, items features). Auto-detects source shape; applies pivot, melt, aggregate, dedupe, and cast as needed. |
+| `create_datasets` | Builds scikit-rec Dataset handles from file paths. Auto-generates schemas from dtypes; auto-dispatches to `InteractionsDataset` / `InteractionMultiOutputDataset` / `InteractionMultiClassDataset`. |
+| `split_data` | Splits a bundle into train/valid/test using temporal, leave-last-n-per-user, random-split-per-user, leave-n-users-out, or random-split. Errors loudly on degenerate splits (e.g. per-user split on one-row-per-user data). |
+| `train_model` | Trains a recommender from a `RecommenderConfig` dict via scikit-rec's factory. Failure envelopes carry a `category` from the diagnose registry plus a one-line `hint`. |
+| `sweep_methods` | Trains and evaluates multiple methods on the same bundle and returns a ranked leaderboard. Modes: `list` (menu only), `auto` (data-aware filter + hyperparameter resize), `all` (every entry), `broad` (every capability-compatible triple), or explicit method dicts / short_names. Idempotent across re-runs. |
+| `diagnose_training_failure` | Pattern-matches a failed `train_model` envelope against a 14-pattern registry and returns ranked candidate fixes with structured actions. Auto-retries the top safe fix; bounded by `max_retries` to prevent loops. |
+| `evaluate_model` | Runs offline evaluation on a trained model with any of 7 evaluator types × 9 metrics at multiple k values. Auto-builds `eval_kwargs` from the bundle's validation interactions for the `simple` evaluator. |
+| `compare_models` | Renders a markdown leaderboard across all (or a chosen subset of) trained models in the session, sorted by a primary metric. |
+| `run_hpo` | Optuna-driven hyperparameter search over a user-specified `search_space`. Persists the best config and writes the tuned model into the session. |
+| `save_model` | Persists a trained model to the local file-based registry with optional tags. |
+| `list_models` | Lists saved models in the registry with their metadata and tags. |
+| `load_model` | Restores a saved model into the current session for further use. |
+
+The system prompt is built at import time from scikit-rec's live enum maps, so new recommender / scorer / estimator types get picked up automatically.
 
 ## Hallucination safeguards
 

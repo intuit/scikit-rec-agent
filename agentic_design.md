@@ -772,10 +772,14 @@ scikit-rec-agent/
 │   ├── test_llm_adapters.py        # Anthropic + OpenAI with mocked API
 │   └── test_agent_integration.py   # End-to-end with scripted LLM
 └── examples/
-    ├── movielens_session.md        # Example conversation transcript
-    ├── custom_tool.py              # Adding a user-defined tool
-    ├── custom_prompt.py            # Overriding the default system prompt
-    └── custom_frontend.py          # Driving Agent from Jupyter / Slack / web
+    ├── customizations/
+    │   ├── custom_tool.py              # Adding a user-defined tool
+    │   ├── custom_prompt.py            # Overriding the default system prompt
+    │   ├── custom_llm.py               # Plug in your company's internal LLM via BaseLLM
+    │   └── custom_frontend.py          # Driving Agent from Jupyter / Slack / web
+    └── transcripts/
+        ├── movielens_session.md                # Captured sweep-flow session
+        └── movielens_hierarchical_session.md   # Captured hierarchical-flow session
 ```
 
 ---

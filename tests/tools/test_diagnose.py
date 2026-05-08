@@ -30,6 +30,24 @@ def test_match_nan_in_features():
     assert d.category == "nan_in_features"
 
 
+def test_nan_in_features_fixes_are_not_auto_retryable():
+    """Regression: a previous version had a fix that claimed to "switch to a
+    NaN-tolerant estimator" but actually only set xgboost.n_estimators=100,
+    a no-op for NaN handling. The auto-retry would loop on the same NaN
+    error forever. Both fixes must be advise-user (data-side cleanup);
+    none should be auto_retryable."""
+    env = {"error_type": "ValueError", "message": "Input contains NaN."}
+    d = _match(env)
+    assert d.category == "nan_in_features"
+    assert d.fixes
+    assert all(not f.auto_retryable for f in d.fixes), (
+        f"NaN handling is data-side; no fix should auto-retry. Got: "
+        f"{[(f.description, f.auto_retryable) for f in d.fixes]}"
+    )
+    # Both fixes must surface useful guidance via advise_user actions.
+    assert all(f.action.get("type") == "advise_user" for f in d.fixes)
+
+
 def test_match_schema_mismatch_user_id():
     env = {"error_type": "KeyError", "message": "column not found: USER_ID"}
     d = _match(env)

@@ -396,7 +396,7 @@ def _filter_by_profile(method: dict[str, Any], profile: dict[str, Any]) -> tuple
 
     Rules per family:
     - **xgb_*** : always keep — safe baseline at every scale.
-    - **mf_universal** : keep if sparsity > 0.95 and n_rows >= 1000. MF
+    - **mf_universal** : keep if sparsity >= 0.90 and n_rows >= 1000. MF
       shines in the classic CF regime; on dense data the collaborative
       signal collapses, on tiny data ALS can't factorize stably.
     - **ncf / two_tower / dcn / nfm** : keep if n_rows >= 5000. Deep
@@ -416,15 +416,30 @@ def _filter_by_profile(method: dict[str, Any], profile: dict[str, Any]) -> tuple
     target_type = profile.get("target_type")
 
     if target_type == "continuous":
-        # For now only XGBoost has a clean regression swap; embedding /
-        # sequential families would need outcome_type adjustments per class.
-        if "xgb" not in short:
-            return False, f"target is continuous; {short} doesn't auto-swap to regression"
+        # XGBoost: resize swaps ml_task='classification' → 'regression' below.
+        # SASRec/HRNN: resize swaps `*_classifier` model_type → `*_regressor`.
+        # Embedding families (MF/NCF/Two-Tower/DCN/NFM): the auto-sweep configs
+        # are classifier-shaped (BCE loss, etc.) and we don't have a clean
+        # auto-swap for them today, so they're filtered out here. Users who
+        # want to compare regression variants of embedding families can
+        # supply explicit method dicts.
+        if "xgb" in short:
+            pass  # resize swaps ml_task
+        elif any(family in short for family in ("sasrec", "hrnn")):
+            pass  # resize swaps model_type below
+        else:
+            return False, (
+                f"target is continuous; {short} has no auto-swap to a regression "
+                "variant in this version. Pass an explicit method dict if you want it."
+            )
 
     if "mf" in short and "_universal" in short:
         sparsity = profile.get("sparsity")
-        if sparsity is None or sparsity < 0.95:
-            return False, f"MF needs sparsity ≥ 0.95 (CF regime); got {sparsity}"
+        # 0.90 floor (was 0.95): standard CF benchmarks live in 0.80–0.95;
+        # MovieLens-1M sits at ~0.949, retail/catalogue datasets around 0.90.
+        # The original 0.95 threshold filtered most realistic CF data out.
+        if sparsity is None or sparsity < 0.90:
+            return False, f"MF needs sparsity ≥ 0.90 (CF regime); got {sparsity}"
         if n_rows < 1_000:
             return False, f"MF needs n_rows ≥ 1000 to factorize stably; got {n_rows}"
         return True, None
@@ -498,6 +513,14 @@ def _resize_for_data_scale(method: dict[str, Any], profile: dict[str, Any]) -> d
 
     sequential = estimator_config.get("sequential", {})
     if sequential:
+        # Swap *_classifier → *_regressor when the target is continuous.
+        # SASRec and HRNN both expose paired classifier / regressor variants
+        # via the orchestrator factory, so we can do this without changing
+        # any other config piece. The filter step (_filter_by_profile) above
+        # relies on this swap actually happening — keep them in sync.
+        seq_model_type = sequential.get("model_type", "")
+        if target_type == "continuous" and seq_model_type.endswith("_classifier"):
+            sequential["model_type"] = seq_model_type.replace("_classifier", "_regressor")
         params = sequential.setdefault("params", {})
         # Sequential keeps a tighter lid on hidden_units to control torch
         # memory; max_len and epochs scale with the tier.
@@ -524,8 +547,19 @@ def _data_aware_methods(
     return kept, dropped
 
 
-def _detect_bundle_contract(bundle) -> str:
-    df = _read(bundle.source_paths.get("interactions"))
+def contract_from_dataframe(df: pd.DataFrame) -> str:
+    """Single source of truth for "what data shape does this look like".
+
+    Vocabulary: ``long_interactions`` / ``long_with_timestamp`` /
+    ``long_multi_reward`` / ``wide_multioutput`` / ``multiclass`` /
+    ``prebuilt_sequences`` / ``sessions`` / ``unknown``.
+
+    Used by both ``_detect_bundle_contract`` (sweep flow's data-aware
+    selection) and ``_detect_dataset_type`` (datasets.py's choice of
+    scikit-rec Dataset class). Putting both on top of a shared helper
+    means the sweep's ``contract`` and a bundle's ``dataset_type`` can
+    never disagree about the same data — they read from the same rules.
+    """
     if df.empty:
         return "unknown"
     cols = set(df.columns)
@@ -547,6 +581,10 @@ def _detect_bundle_contract(bundle) -> str:
     if "USER_ID" in cols and len(item_star) >= 2:
         return "wide_multioutput"
     return "unknown"
+
+
+def _detect_bundle_contract(bundle) -> str:
+    return contract_from_dataframe(_read(bundle.source_paths.get("interactions")))
 
 
 # ---------------------------------------------------------------------------
@@ -706,18 +744,29 @@ def _build_train_args(method: dict[str, Any]) -> dict[str, Any]:
 def _train_and_evaluate(
     method: dict[str, Any],
     bundle_id: str,
-    model_id: str,
+    sweep_cache_id: str,
     metrics: list[str],
     eval_top_k: int,
     evaluator_type: str,
     session,
 ) -> dict[str, Any]:
+    """Train + evaluate one method. Returns a row dict for the leaderboard.
+
+    `sweep_cache_id` is the sweep's deterministic id (used for caching across
+    re-runs); the actual model_id we return to the caller is whatever
+    train_model assigned (an auto-generated `<recommender>_<timestamp>` id).
+    We record the alias in `session.sweep_cache` so a later sweep call can
+    look up "have I trained this exact (bundle, config) before?" without
+    mutating the keys of `session.trained_models` — that contract stays
+    stable for any other tool / agent code that holds onto train_model's
+    returned id.
+    """
     from scikit_rec_agent.tools.evaluation import TOOL_EVALUATE_MODEL
     from scikit_rec_agent.tools.training import TOOL_TRAIN_MODEL
 
     config = _build_train_args(method)
     train_result = TOOL_TRAIN_MODEL.fn(
-        model_name=model_id,
+        model_name=sweep_cache_id,
         config=config,
         bundle_id=bundle_id,
         session=session,
@@ -731,22 +780,16 @@ def _train_and_evaluate(
             "model_id": None,
         }
 
-    # Re-key the handle under the sweep's deterministic model_id so that a
-    # later sweep with skip_existing=True can find it. train_model itself
-    # registers under an auto-generated `<recommender>_<timestamp>` id;
-    # without this re-key the cache hit branch never fires.
     trained_model_id = train_result["data"]["model_id"]
-    handle = session.trained_models.pop(trained_model_id)
-    handle.model_id = model_id
-    handle.name = model_id
-    session.trained_models[model_id] = handle
+    session.sweep_cache[sweep_cache_id] = trained_model_id
+    handle = session.trained_models[trained_model_id]
 
     metric_pairs = [_split_metric_spec(m, eval_top_k) for m in metrics]
     metric_names = sorted({n for n, _ in metric_pairs})
     k_values = sorted({k for _, k in metric_pairs})
 
     eval_result = TOOL_EVALUATE_MODEL.fn(
-        model_id=model_id,
+        model_id=trained_model_id,
         evaluator_type=evaluator_type,
         metrics=metric_names,
         k_values=k_values,
@@ -758,14 +801,14 @@ def _train_and_evaluate(
             "error": eval_result.get("message"),
             "category": eval_result.get("category", "unknown"),
             "metrics": dict(handle.metrics),
-            "model_id": model_id,
+            "model_id": trained_model_id,
         }
 
     metric_map = {f"{name}@{k}": handle.metrics.get(f"{name}@{k}") for name, k in metric_pairs}
     return {
         "status": "ok",
         "metrics": metric_map,
-        "model_id": model_id,
+        "model_id": trained_model_id,
     }
 
 
@@ -815,6 +858,27 @@ def _evaluate_existing(
 def _resolve_primary_metric_key(primary_metric: str, eval_top_k: int) -> str:
     name, k = _split_metric_spec(primary_metric, eval_top_k)
     return f"{name}@{k}"
+
+
+# Set of scikit-rec metric names where LOWER values are better. Anything not
+# in this set is sorted higher-is-better. Today scikit-rec ships only
+# higher-is-better metrics (NDCG / MAP / MRR / precision / recall /
+# average_reward / ROC-AUC / PR-AUC / expected_reward); this set is the
+# extension point for when loss-shaped metrics land.
+_LOWER_IS_BETTER_METRICS: set[str] = {
+    "logloss",
+    "rmse",
+    "mse",
+    "mae",
+    "log_loss",
+    "cross_entropy",
+}
+
+
+def _metric_higher_is_better(primary_metric: str) -> bool:
+    """Return True if higher metric values are better, False for loss-shaped."""
+    name, _ = _split_metric_spec(primary_metric, default_k=10)
+    return name.lower() not in _LOWER_IS_BETTER_METRICS
 
 
 # ---------------------------------------------------------------------------
@@ -959,10 +1023,17 @@ def _sweep_methods(
     for method in runnable:
         config_hash = _config_hash(bundle_id, method)
         short = method.get("short_name") or _short_name(method)
-        model_id = f"{name_prefix}_{short}_{config_hash[:8]}"
+        sweep_cache_id = f"{name_prefix}_{short}_{config_hash[:8]}"
 
-        if skip_existing and model_id in session.trained_models:
-            handle = session.trained_models[model_id]
+        # Cache lookup: was this exact (bundle, config) trained in a prior
+        # sweep call? `session.sweep_cache` aliases the sweep's deterministic
+        # id to whatever model_id train_model produced, so we look up the
+        # alias and then fetch the handle from session.trained_models. This
+        # keeps train_model's returned model_id stable across re-runs (no
+        # silent re-keying behind the caller's back).
+        cached_train_id = session.sweep_cache.get(sweep_cache_id) if skip_existing else None
+        if cached_train_id and cached_train_id in session.trained_models:
+            handle = session.trained_models[cached_train_id]
             # If a previous sweep trained this model but its evaluation failed
             # (e.g. bad metric name on the prior call), the cached handle has
             # an empty metrics dict. Re-evaluate it instead of returning a
@@ -972,14 +1043,15 @@ def _sweep_methods(
                 leaderboard.append(
                     {
                         "method": method,
-                        "model_id": model_id,
+                        "model_id": cached_train_id,
+                        "sweep_cache_id": sweep_cache_id,
                         "status": "cached",
                         "metrics": dict(handle.metrics),
                     }
                 )
                 continue
             eval_only = _evaluate_existing(
-                model_id=model_id,
+                model_id=cached_train_id,
                 metrics=metrics,
                 eval_top_k=eval_top_k,
                 evaluator_type=evaluator_type,
@@ -989,7 +1061,8 @@ def _sweep_methods(
                 leaderboard.append(
                     {
                         "method": method,
-                        "model_id": model_id,
+                        "model_id": cached_train_id,
+                        "sweep_cache_id": sweep_cache_id,
                         "status": "cached",
                         "metrics": eval_only["metrics"],
                     }
@@ -998,7 +1071,8 @@ def _sweep_methods(
                 leaderboard.append(
                     {
                         "method": method,
-                        "model_id": model_id,
+                        "model_id": cached_train_id,
+                        "sweep_cache_id": sweep_cache_id,
                         "status": "error",
                         "error": eval_only.get("error"),
                         "category": eval_only.get("category"),
@@ -1010,7 +1084,7 @@ def _sweep_methods(
         result = _train_and_evaluate(
             method=method,
             bundle_id=bundle_id,
-            model_id=model_id,
+            sweep_cache_id=sweep_cache_id,
             metrics=metrics,
             eval_top_k=eval_top_k,
             evaluator_type=evaluator_type,
@@ -1020,7 +1094,8 @@ def _sweep_methods(
             leaderboard.append(
                 {
                     "method": method,
-                    "model_id": model_id,
+                    "model_id": result["model_id"],
+                    "sweep_cache_id": sweep_cache_id,
                     "status": "ok",
                     "metrics": result["metrics"],
                 }
@@ -1029,7 +1104,8 @@ def _sweep_methods(
             leaderboard.append(
                 {
                     "method": method,
-                    "model_id": model_id,
+                    "model_id": result.get("model_id"),
+                    "sweep_cache_id": sweep_cache_id,
                     "status": "error",
                     "error": result.get("error"),
                     "category": result.get("category"),
@@ -1037,9 +1113,21 @@ def _sweep_methods(
                 }
             )
 
+    # Sort direction: most ranking metrics are higher-is-better (NDCG, MAP,
+    # MRR, precision, recall, average_reward, ROC-AUC, PR-AUC, expected_reward),
+    # but a future metric registry could add loss-shaped or error-shaped
+    # entries (logloss, RMSE) where lower-is-better. Detect that from the
+    # metric NAME so we don't silently rank a loss-metric leaderboard
+    # backwards. The set covers everything in scikit-rec's RecommenderMetricType
+    # today; unknown metrics default to higher-is-better with a guard rail.
+    higher_is_better = _metric_higher_is_better(primary_metric)
+
     def sort_key(row):
         v = row.get("metrics", {}).get(primary_key)
-        return -float(v) if v is not None else float("inf")
+        if v is None:
+            return float("inf")  # missing metrics sort last regardless of direction
+        v = float(v)
+        return -v if higher_is_better else v
 
     leaderboard.sort(key=sort_key)
 

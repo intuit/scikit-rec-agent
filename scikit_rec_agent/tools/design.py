@@ -482,7 +482,28 @@ def apply_overrides(assembled_config: dict[str, Any], overrides: dict[str, Any])
     else:
         fallback_bucket = recommender_params
 
+    # Some hyperparameters are mirrored across buckets and must stay in sync.
+    # `max_len` for sequential recommenders is the canonical case: it lives in
+    # both `estimator_config.sequential.params.max_len` (controls how the
+    # estimator pads / trims sequences) AND `recommender_params.max_len` (the
+    # SequentialRecommender uses it during data preparation to truncate user
+    # histories). If only one bucket gets updated the train/recommend
+    # pipeline silently uses two different lengths. The mirror_keys set
+    # below enumerates the param names that must update every bucket they
+    # appear in, not just the first.
+    mirror_keys = {"max_len"}
+
     for key, value in overrides.items():
+        if key in mirror_keys:
+            updated_any = False
+            for bucket in (xgb, embedding_params, sequential_params, recommender_params):
+                if bucket is not None and key in bucket:
+                    bucket[key] = value
+                    updated_any = True
+            if not updated_any:
+                fallback_bucket[key] = value
+            continue
+
         for bucket in (xgb, embedding_params, sequential_params, recommender_params):
             if bucket is not None and key in bucket:
                 bucket[key] = value
@@ -620,6 +641,9 @@ def _terminal_payload(choices: dict[str, str], profile: dict[str, Any], resize_f
     if choices["recommender_type"] == "uplift":
         required_recommender_params = copy.deepcopy(UPLIFT_PARAM_EXPLANATIONS)
 
+    train_cost = _estimated_cost("train", choices, profile)
+    hpo_cost = _estimated_cost("hpo", choices, profile)
+
     return ok(
         {
             "next_dimension": "hyperparameters",
@@ -640,6 +664,7 @@ def _terminal_payload(choices: dict[str, str], profile: dict[str, Any], resize_f
                     # supply control_item_id (and pick a mode). Force them through
                     # train_with_overrides instead.
                     "available": not required_recommender_params,
+                    "estimated_cost": train_cost,
                     **(
                         {
                             "blocked_reason": (
@@ -663,6 +688,7 @@ def _terminal_payload(choices: dict[str, str], profile: dict[str, Any], resize_f
                         "and mode in the overrides dict."
                     ),
                     "available": True,
+                    "estimated_cost": train_cost,
                     "helper": "scikit_rec_agent.tools.design.apply_overrides",
                 },
                 {
@@ -675,6 +701,12 @@ def _terminal_payload(choices: dict[str, str], profile: dict[str, Any], resize_f
                         "in the base config's recommender_params before running HPO."
                     ),
                     "available": bool(suggested_search_space),
+                    "estimated_cost": hpo_cost,
+                    # search_space_hint shows the agent the search space ready to feed
+                    # run_hpo — same shape, different name to avoid confusion with the
+                    # top-level `suggested_search_space` field that the agent surfaces
+                    # to the user. Both fields point at the same dict by reference.
+                    "search_space_hint": suggested_search_space,
                 },
             ],
             "assembled_config": config,
@@ -685,6 +717,58 @@ def _terminal_payload(choices: dict[str, str], profile: dict[str, Any], resize_f
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _estimated_cost(action: str, choices: dict[str, str], profile: dict[str, Any]) -> str:
+    """Rough wall-clock estimate for the given terminal action.
+
+    Heuristic, not measured — based on data tier, estimator family, and
+    how many models the action trains. Surfaced as `estimated_cost` on
+    each `next_action_options` entry so the agent can present the cost
+    tradeoff to the user. Strings rather than numbers because the
+    granularity is "minutes vs hours", not seconds.
+    """
+    n_rows = profile.get("n_rows", 0) or 0
+    estimator_type = choices.get("estimator_type", "tabular")
+
+    # Baseline single-train cost by tier × estimator family.
+    if estimator_type == "tabular":
+        if n_rows < 5_000:
+            train = "<10s"
+        elif n_rows < 100_000:
+            train = "10-60s"
+        elif n_rows < 1_000_000:
+            train = "1-5 min"
+        else:
+            train = "5-30 min"
+    elif estimator_type == "embedding":
+        if n_rows < 5_000:
+            train = "10-30s"
+        elif n_rows < 100_000:
+            train = "30s-3 min"
+        elif n_rows < 1_000_000:
+            train = "3-15 min"
+        else:
+            train = "15-60 min"
+    elif estimator_type == "sequential":
+        if n_rows < 5_000:
+            train = "30s-2 min"
+        elif n_rows < 100_000:
+            train = "2-10 min"
+        elif n_rows < 1_000_000:
+            train = "10-60 min"
+        else:
+            train = "1-4 hr"
+    else:
+        train = "unknown"
+
+    if action == "train":
+        return train
+    if action == "hpo":
+        # Optuna default ~20-50 trials. Cost scales linearly with trials and
+        # with the per-train cost; stating a 20× multiplier is sensible.
+        return f"~20× the train cost ({train} per trial × ~20 trials)"
+    return "unknown"
 
 
 def _public_signals(profile: dict[str, Any]) -> dict[str, Any]:

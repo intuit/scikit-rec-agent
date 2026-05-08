@@ -87,6 +87,15 @@ def test_parse_timestamp_to_int_seconds():
     assert "date" not in out.columns
 
 
+def test_parse_timestamp_rejects_unparseable_values():
+    """Regression: pd.to_datetime(errors='coerce') silently produces NaT for
+    bad values, then astype('int64') turns them into INT64_MIN. Must raise
+    naming the offending column + count instead."""
+    df = pd.DataFrame({"date": ["2024-01-01", "not a date", "also bad"]})
+    with pytest.raises(ValueError, match="unparseable"):
+        _op_parse_timestamp(df, "date")
+
+
 def test_dedupe_user_id_keeps_first():
     df = pd.DataFrame({"USER_ID": ["a", "a", "b"], "v": [1, 2, 3]})
     out = _op_dedupe_user_id(df)

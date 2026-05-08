@@ -3,11 +3,11 @@
 The agent never talks to a specific provider directly — it only knows about
 `BaseLLM`. The built-in Anthropic and OpenAI adapters are two reference
 implementations; anything satisfying the same protocol works. This file walks
-through building an adapter for a fictional internal service ("Intuit LLM")
+through building an adapter for a fictional internal service ("Acme LLM")
 so you can see exactly which translation points you need to handle.
 
-Replace the FakeIntuitClient / response shapes below with your real internal
-SDK. Everything from IntuitLLMAdapter downward is the template you keep.
+Replace the FakeAcmeClient / response shapes below with your real internal
+SDK. Everything from AcmeLLMAdapter downward is the template you keep.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from scikit_rec_agent import Agent, LLMResponse, LLMStreamEvent, ToolCall
 # ---------------------------------------------------------------------------
 # 1. A stand-in for your company's LLM client.
 #
-# Replace this entire section with `from intuit_llm import IntuitClient`
+# Replace this entire section with `from acme_llm import AcmeClient`
 # (or whatever your real SDK is). The adapter below only cares about the
 # SHAPE of this client: what kwargs it takes, what it returns, how it streams.
 # ---------------------------------------------------------------------------
@@ -40,8 +40,8 @@ class _FakeResponse:
     stop_reason: str = "done"
 
 
-class FakeIntuitClient:
-    """Mimics the surface your real Intuit LLM client might expose.
+class FakeAcmeClient:
+    """Mimics the surface your real Acme LLM client might expose.
 
     For the sake of the example the methods just return canned responses.
     The only interesting thing is that they accept provider-native shapes
@@ -78,8 +78,8 @@ class FakeIntuitClient:
 # ---------------------------------------------------------------------------
 
 
-class IntuitLLMAdapter:
-    """BaseLLM implementation for the fictional Intuit LLM service.
+class AcmeLLMAdapter:
+    """BaseLLM implementation for the fictional Acme LLM service.
 
     The agent calls chat() or chat_stream() with Anthropic-native messages
     and tools. This adapter:
@@ -88,7 +88,7 @@ class IntuitLLMAdapter:
       - translates the response back to LLMResponse / LLMStreamEvent
     """
 
-    def __init__(self, client: FakeIntuitClient, model: str = "intuit-default"):
+    def __init__(self, client: FakeAcmeClient, model: str = "acme-default"):
         self.client = client
         self.model = model
 
@@ -103,8 +103,8 @@ class IntuitLLMAdapter:
         response = self.client.complete(
             model=self.model,
             system=system,
-            messages=_to_intuit_messages(messages),
-            tools=_to_intuit_tools(tools),
+            messages=_to_acme_messages(messages),
+            tools=_to_acme_tools(tools),
         )
         return LLMResponse(
             content=response.text,
@@ -135,8 +135,8 @@ class IntuitLLMAdapter:
         for chunk in self.client.complete_stream(
             model=self.model,
             system=system,
-            messages=_to_intuit_messages(messages),
-            tools=_to_intuit_tools(tools),
+            messages=_to_acme_messages(messages),
+            tools=_to_acme_tools(tools),
         ):
             ctype = chunk.get("type")
             if ctype == "text":
@@ -179,8 +179,8 @@ class IntuitLLMAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _to_intuit_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Translate Anthropic-native messages to the Intuit service's format.
+def _to_acme_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate Anthropic-native messages to the Acme service's format.
 
     Input messages look like:
       {"role": "user", "content": "hello"}
@@ -200,7 +200,7 @@ def _to_intuit_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(messages)
 
 
-def _to_intuit_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _to_acme_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Translate tool schemas.
 
     Input tools are Anthropic-native:
@@ -237,7 +237,7 @@ def _map_stop_reason(raw: str | None) -> str:
 
 
 if __name__ == "__main__":
-    client = FakeIntuitClient()
-    adapter = IntuitLLMAdapter(client, model="intuit-sonnet")
+    client = FakeAcmeClient()
+    adapter = AcmeLLMAdapter(client, model="acme-sonnet")
     agent = Agent(llm=adapter)
     agent.chat()  # same CLI experience as the built-in adapters

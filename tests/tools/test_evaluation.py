@@ -11,6 +11,15 @@ from scikit_rec_agent.tools.evaluation import TOOL_COMPARE_MODELS, TOOL_EVALUATE
 from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
 from scikit_rec_agent.tools.training import TOOL_TRAIN_MODEL
 
+try:
+    import torch  # type: ignore[import-unresolved]  # noqa: F401
+
+    _torch_available = True
+except ImportError:
+    _torch_available = False
+
+requires_torch = pytest.mark.skipif(not _torch_available, reason="PyTorch not installed")
+
 _TABULAR_CONFIG = {
     "recommender_type": "ranking",
     "scorer_type": "universal",
@@ -164,6 +173,84 @@ def test_eval_kwargs_per_user_shape_for_sequential_recommender(tmp_path, session
     valid_df = pd.read_csv(valid_path)
     assert items.shape[0] == valid_df["USER_ID"].nunique()
     assert items.shape == rewards.shape
+
+
+@requires_torch
+def test_evaluate_real_sequential_recommender_end_to_end(tmp_path, session):
+    """Companion to the FakeSeqRec shape test above — this one trains a real
+    SASRec via the agent's train_model + evaluate_model path on a small
+    long_with_timestamp bundle. Verifies the per-user logged_items shape
+    actually aligns with what scikit-rec's SequentialScorer expects, not
+    just what our helper guesses. Gated on torch (skipif) since SASRec is
+    a torch estimator; runs in the test-torch CI job alongside the other
+    torch-using tests.
+    """
+    import pandas as pd
+
+    # Tiny long-with-timestamp bundle: enough rows for SASRec to train
+    # without crashing but small enough to finish in seconds.
+    n_users = 20
+    rows_per_user = 8
+    df_rows = []
+    for u in range(n_users):
+        for r in range(rows_per_user):
+            df_rows.append(
+                {
+                    "USER_ID": f"u{u}",
+                    "ITEM_ID": f"i{(u + r) % 10}",
+                    "OUTCOME": float((u + r) % 2),
+                    "TIMESTAMP": str(u * 100 + r),
+                }
+            )
+    p = tmp_path / "long_ts.csv"
+    pd.DataFrame(df_rows).to_csv(p, index=False)
+
+    TOOL_CREATE_DATASETS.fn(bundle_id="seq_b", interactions_path=str(p), session=session)
+    TOOL_SPLIT_DATA.fn(
+        bundle_id="seq_b",
+        strategy="random_split",
+        valid_fraction=0.25,
+        session=session,
+        random_state=1,
+    )
+
+    sasrec_config = {
+        "recommender_type": "sequential",
+        "scorer_type": "sequential",
+        "estimator_config": {
+            "estimator_type": "sequential",
+            "sequential": {
+                "model_type": "sasrec_classifier",
+                "params": {"hidden_units": 8, "max_len": 5, "epochs": 1, "random_state": 42},
+            },
+        },
+        "recommender_params": {"max_len": 5},
+    }
+    train_result = TOOL_TRAIN_MODEL.fn(
+        model_name="real_sasrec",
+        config=sasrec_config,
+        bundle_id="seq_b",
+        session=session,
+    )
+    assert train_result["status"] == "ok", train_result
+    model_id = train_result["data"]["model_id"]
+
+    # The load-bearing assertion: evaluate_model with the simple evaluator
+    # must NOT raise the "Mismatch in N dimension" shape error. The auto-
+    # built per-user logged_items / logged_rewards shape must align with
+    # SequentialScorer's per-user target_proba.
+    eval_result = TOOL_EVALUATE_MODEL.fn(
+        model_id=model_id,
+        evaluator_type="simple",
+        metrics=["NDCG_at_k"],
+        k_values=[5],
+        session=session,
+    )
+    assert eval_result["status"] == "ok", eval_result
+    handle = session.trained_models[model_id]
+    assert "NDCG_at_k@5" in handle.metrics, (
+        f"Expected NDCG_at_k@5 to land on the handle after a successful eval; got metrics={dict(handle.metrics)}"
+    )
 
 
 def test_evaluate_model_enriches_errors_with_category(trained_model, session):

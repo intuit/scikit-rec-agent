@@ -325,21 +325,51 @@ def test_apply_overrides_unknown_key_lands_in_fallback_bucket():
     assert out["estimator_config"]["xgboost"]["reg_alpha"] == 0.1
 
 
-def test_apply_overrides_known_recommender_param():
+def test_apply_overrides_mirrors_max_len_across_buckets():
+    """Regression: SequentialRecommender uses ``max_len`` for data preparation
+    (recommender_params.max_len) AND the underlying estimator uses it for
+    padding/trimming (estimator_config.sequential.params.max_len). If only
+    one bucket gets updated, the train-time and recommend-time lengths
+    disagree silently. apply_overrides must mirror max_len into every
+    bucket where it appears."""
     cfg = {
         "recommender_type": "sequential",
         "scorer_type": "sequential",
         "estimator_config": {
             "estimator_type": "sequential",
-            "sequential": {"model_type": "sasrec_classifier", "params": {"max_len": 10, "hidden_units": 16}},
+            "sequential": {
+                "model_type": "sasrec_classifier",
+                "params": {"max_len": 10, "hidden_units": 16},
+            },
         },
         "recommender_params": {"max_len": 10},
     }
     out = apply_overrides(cfg, {"max_len": 50})
-    # First match wins — `params` bucket has max_len, that's where it lands.
     assert out["estimator_config"]["sequential"]["params"]["max_len"] == 50
-    # recommender_params still has the old value (only the first-match bucket gets updated)
-    assert out["recommender_params"]["max_len"] == 10
+    assert out["recommender_params"]["max_len"] == 50, (
+        "max_len override must propagate to recommender_params; otherwise the "
+        "recommender prepares 10-len histories while the estimator expects 50."
+    )
+
+
+def test_apply_overrides_non_mirror_key_uses_first_match_wins():
+    """Non-mirror keys (everything except max_len) keep the first-match-wins
+    behaviour. hidden_units only lives in estimator_config.sequential.params,
+    so an override for it lands there and nowhere else."""
+    cfg = {
+        "recommender_type": "sequential",
+        "scorer_type": "sequential",
+        "estimator_config": {
+            "estimator_type": "sequential",
+            "sequential": {
+                "model_type": "sasrec_classifier",
+                "params": {"max_len": 10, "hidden_units": 16},
+            },
+        },
+        "recommender_params": {"max_len": 10},
+    }
+    out = apply_overrides(cfg, {"hidden_units": 64})
+    assert out["estimator_config"]["sequential"]["params"]["hidden_units"] == 64
 
 
 # ---------------------------------------------------------------------------

@@ -72,18 +72,43 @@ def _generate_schema(df: pd.DataFrame, file_type: str = "interactions") -> dict[
     return {"columns": columns}
 
 
+# Translation from the unified contract vocabulary (sweep.contract_from_dataframe)
+# to scikit-rec's Dataset class names. The shape-recognition rules live in one
+# place — sweep.contract_from_dataframe — and this map just routes the
+# resulting label to the right Dataset subclass. If you find yourself adding
+# rules HERE, put them in contract_from_dataframe instead so the sweep flow
+# sees them too.
+_CONTRACT_TO_DATASET_TYPE: dict[str, str] = {
+    "long_interactions": "interactions",
+    "long_with_timestamp": "interactions",
+    "long_multi_reward": "interactions",
+    "wide_multioutput": "interaction_multioutput",
+    "multiclass": "interaction_multiclass",
+    # Sequential-style contracts use plain InteractionsDataset; the
+    # SequentialRecommender wraps the data into per-user sequences itself.
+    "prebuilt_sequences": "interactions",
+    "sessions": "interactions",
+    "unknown": "interactions",
+}
+
+
 def _detect_dataset_type(df: pd.DataFrame) -> str:
-    """Pick the right scikit-rec Dataset class for an interactions file based
-    on its columns. Falls back to plain `interactions` (long-format) when no
-    other shape is recognised — that's what the original tool always did.
+    """Pick the right scikit-rec Dataset class for an interactions file.
+
+    Delegates the shape-recognition to ``contract_from_dataframe`` (sweep.py)
+    so this and the sweep flow's ``_detect_bundle_contract`` can never drift
+    apart on the same data. Returns one of:
+
+      ``interactions`` / ``interaction_multioutput`` / ``interaction_multiclass``
+
+    matching the available scikit-rec Dataset subclasses.
     """
-    cols = set(df.columns)
-    item_star = [c for c in df.columns if c.startswith("ITEM_") and c != "ITEM_ID"]
-    if "USER_ID" in cols and "ITEM_ID" not in cols and len(item_star) >= 2:
-        return "interaction_multioutput"
-    if "USER_ID" in cols and "ITEM_ID" in cols and "OUTCOME" not in cols and not item_star:
-        return "interaction_multiclass"
-    return "interactions"
+    # Lazy import — sweep.py imports tools/__init__.py which imports this
+    # module via _collect_default_tools, so a top-level import would cycle.
+    from scikit_rec_agent.tools.sweep import contract_from_dataframe
+
+    contract = contract_from_dataframe(df)
+    return _CONTRACT_TO_DATASET_TYPE.get(contract, "interactions")
 
 
 def _rename_and_write(src_path: str, column_mapping: dict[str, str], tmp_dir: str) -> str:

@@ -88,20 +88,45 @@ _REGISTRY: list[FailurePattern] = [
         name="nan_in_features",
         category="nan_in_features",
         pattern=re.compile(
-            r"(input contains nan|cannot convert float nan to integer|"
-            r"contains nan|missing values)",
+            r"(input contains nan|cannot convert float nan to integer|contains nan|missing values)",
             re.IGNORECASE,
         ),
-        causes=["A feature column contains NaN values that the estimator cannot consume."],
+        causes=[
+            "A feature column contains NaN values that the estimator cannot consume. "
+            "XGBoost on its own handles NaN natively, but several upstream paths in scikit-rec "
+            "(MultiOutputClassifier wrapper, sklearn check_array calls, embedding estimators) "
+            "reject NaN before XGBoost ever sees it."
+        ],
         fixes=[
             Fix(
-                description="Switch to a NaN-tolerant estimator (LightGBM or XGBoost).",
-                action={"type": "modify_config", "set": {"estimator_config.xgboost.n_estimators": 100}},
-                auto_retryable=True,
+                # NOTE: NaN handling is fundamentally a data-side problem — there's no
+                # safe auto-retry that can fix it without changing the user's data.
+                # Both fixes below are non-auto-retryable; the agent surfaces them to
+                # the user and asks them to re-run create_datasets on the cleaned file.
+                description="Drop fully-NaN columns and impute partial-NaN columns in the source data.",
+                action={
+                    "type": "advise_user",
+                    "text": (
+                        "transform_data has `drop_null_columns=True` by default — that handles "
+                        "100% NaN columns. For partially-NaN columns, impute before "
+                        "create_datasets: median for numeric features, mode for categorical, "
+                        "or use pandas' fillna(0) if 0 is a sensible 'missing' value for your "
+                        "domain. Identify the offending column from the error message itself."
+                    ),
+                },
+                auto_retryable=False,
             ),
             Fix(
-                description="Drop fully-NaN columns before training.",
-                action={"type": "advise_user", "text": "Re-run transform_data with drop_null_columns=True."},
+                description="Drop the offending feature column entirely if it's not load-bearing.",
+                action={
+                    "type": "advise_user",
+                    "text": (
+                        "If the NaN column isn't a useful feature (high-cardinality identifiers, "
+                        "audit fields, or columns with >50% missing), it's often easier to drop it "
+                        "than to impute. Pass an explicit `feature_columns` list to transform_data "
+                        "to keep only the features you want."
+                    ),
+                },
                 auto_retryable=False,
             ),
         ],
@@ -661,9 +686,25 @@ def _diagnose_training_failure(
         payload["retry_blocked_reason"] = f"max_retries={max_retries} reached for '{model_name}'."
         return ok(payload)
 
-    top_fix = next((f for f in candidate_fixes if f.auto_retryable), None)
+    top_fix = next(
+        (f for f in candidate_fixes if f.auto_retryable and f.action.get("type") == "modify_config"),
+        None,
+    )
     if top_fix is None:
-        payload["retry_blocked_reason"] = "No auto-retryable fixes available; user approval needed."
+        # If a candidate is auto_retryable but its action type isn't a config
+        # mutation we know how to apply (modify_config), surface it as a
+        # blocker instead of silently invoking _apply_fix as a no-op and
+        # looping until max_retries with the same error.
+        non_modify = [f for f in candidate_fixes if f.auto_retryable and f.action.get("type") != "modify_config"]
+        if non_modify:
+            payload["retry_blocked_reason"] = (
+                "Top auto-retryable fix's action type is not 'modify_config' "
+                f"({non_modify[0].action.get('type')!r}); _apply_fix doesn't know "
+                "how to apply non-config-mutating actions. Mark such fixes "
+                "auto_retryable=False or extend _apply_fix to handle the action type."
+            )
+        else:
+            payload["retry_blocked_reason"] = "No auto-retryable fixes available; user approval needed."
         return ok(payload)
 
     if last_record is None:

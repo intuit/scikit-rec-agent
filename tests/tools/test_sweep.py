@@ -119,6 +119,21 @@ def test_split_metric_with_explicit_k():
     assert (name, k) == ("NDCG_at_k", 20)
 
 
+def test_metric_higher_is_better_default_and_loss_metrics():
+    """Regression: a fixed-direction sort_key would order loss-shaped metrics
+    backwards. Sweep now consults a small registry of lower-is-better names
+    so future loss metrics sort correctly without flipping every existing
+    higher-is-better metric."""
+    from scikit_rec_agent.tools.sweep import _metric_higher_is_better
+
+    # All current scikit-rec metrics are higher-is-better.
+    for m in ("NDCG_at_k", "MAP_at_k", "MRR_at_k", "precision_at_k", "recall_at_k", "roc_auc", "pr_auc"):
+        assert _metric_higher_is_better(m), f"{m} should be higher-is-better"
+    # Loss-shaped names are lower-is-better.
+    for m in ("logloss", "log_loss", "rmse", "mse", "mae", "cross_entropy"):
+        assert not _metric_higher_is_better(m), f"{m} should be lower-is-better"
+
+
 def test_split_metric_at_number_form_canonicalises():
     """Regression: when the LLM passes 'NDCG_at_10' (numeric instead of
     literal 'k'), the regex previously yielded name='NDCG_at' which
@@ -158,6 +173,69 @@ def test_broad_sweep_long_interactions_excludes_sequential():
 # ---------------------------------------------------------------------------
 # Contract detection
 # ---------------------------------------------------------------------------
+
+
+def test_contract_detectors_agree_on_overlapping_shapes(tmp_path):
+    """Regression: there used to be two separate detection functions
+    (sweep._detect_bundle_contract vs datasets._detect_dataset_type) with
+    different vocabularies AND slightly different rules. They could disagree
+    on edge cases like 'USER_ID + ITEM_ID + ≥2 ITEM_* + no OUTCOME'.
+    Both now go through sweep.contract_from_dataframe, so they must agree
+    via the _CONTRACT_TO_DATASET_TYPE mapping for every shape we recognise."""
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import _CONTRACT_TO_DATASET_TYPE, _detect_dataset_type
+    from scikit_rec_agent.tools.sweep import contract_from_dataframe
+
+    fixtures: list[tuple[str, pd.DataFrame]] = [
+        # long_interactions
+        (
+            "long_interactions",
+            pd.DataFrame({"USER_ID": ["u1"], "ITEM_ID": ["i1"], "OUTCOME": [1.0]}),
+        ),
+        # long_with_timestamp
+        (
+            "long_with_timestamp",
+            pd.DataFrame({"USER_ID": ["u1"], "ITEM_ID": ["i1"], "OUTCOME": [1.0], "TIMESTAMP": ["1"]}),
+        ),
+        # long_multi_reward
+        (
+            "long_multi_reward",
+            pd.DataFrame({"USER_ID": ["u1"], "ITEM_ID": ["i1"], "OUTCOME": [1.0], "OUTCOME_revenue": [10.0]}),
+        ),
+        # wide_multioutput
+        (
+            "wide_multioutput",
+            pd.DataFrame({"USER_ID": ["u1"], "ITEM_a": [1], "ITEM_b": [0]}),
+        ),
+        # multiclass
+        (
+            "multiclass",
+            pd.DataFrame({"USER_ID": ["u1"], "ITEM_ID": ["A"]}),
+        ),
+        # prebuilt_sequences
+        (
+            "prebuilt_sequences",
+            pd.DataFrame({"USER_ID": ["u1"], "ITEM_SEQUENCE": [["a", "b"]]}),
+        ),
+        # sessions
+        (
+            "sessions",
+            pd.DataFrame({"USER_ID": ["u1"], "SESSION_SEQUENCES": [[["a", "b"], ["c"]]]}),
+        ),
+    ]
+    for expected_contract, df in fixtures:
+        contract = contract_from_dataframe(df)
+        assert contract == expected_contract, (
+            f"contract_from_dataframe returned {contract!r} for shape "
+            f"{list(df.columns)}; expected {expected_contract!r}"
+        )
+        # _detect_dataset_type must match the translation map.
+        ds_type = _detect_dataset_type(df)
+        assert ds_type == _CONTRACT_TO_DATASET_TYPE[expected_contract], (
+            f"detect_dataset_type returned {ds_type!r} for {expected_contract}; "
+            f"expected {_CONTRACT_TO_DATASET_TYPE[expected_contract]!r}"
+        )
 
 
 def test_detect_bundle_contract_long_interactions(binary_reward_paths, session):
@@ -259,6 +337,48 @@ def test_sweep_filters_incompatible_explicit_methods(split_bundle):
     assert data["n_runnable"] == 1
     assert data["n_dropped_incompatible"] == 1
     assert data["dropped_methods"][0]["method"]["short_name"] == "incompatible"
+
+
+def test_sweep_does_not_rekey_session_trained_models(split_bundle):
+    """Regression: sweep used to pop the trained model out of
+    session.trained_models and re-insert under its own deterministic
+    sweep id. That broke train_model's contract — the model_id it
+    returned was no longer findable in session.trained_models.
+
+    Now the deterministic sweep id is a separate alias in
+    session.sweep_cache, and the model stays at train_model's auto-id.
+    """
+    session = split_bundle
+    method = {
+        "short_name": "xgb_small",
+        "recommender_type": "ranking",
+        "scorer_type": "universal",
+        "estimator_type": "tabular",
+        "estimator_config": {
+            "ml_task": "classification",
+            "xgboost": {"n_estimators": 10, "max_depth": 3},
+        },
+    }
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="b",
+        methods=[method],
+        metrics=["NDCG_at_k"],
+        primary_metric="NDCG_at_k",
+        eval_top_k=5,
+        session=session,
+    )
+    row = result["data"]["leaderboard"][0]
+    train_model_id = row["model_id"]
+    sweep_cache_id = row["sweep_cache_id"]
+
+    # The model_id returned by the sweep == train_model's auto-generated id,
+    # which IS findable in session.trained_models.
+    assert train_model_id in session.trained_models
+    # The deterministic sweep id is recorded in session.sweep_cache as an
+    # alias to that model_id.
+    assert session.sweep_cache.get(sweep_cache_id) == train_model_id
+    # The deterministic sweep id is NOT itself a key in trained_models.
+    assert sweep_cache_id not in session.trained_models or sweep_cache_id == train_model_id
 
 
 def test_sweep_cached_with_empty_metrics_re_evaluates(split_bundle):
@@ -633,6 +753,16 @@ def test_filter_keeps_mf_in_sparse_cf_regime():
     assert keep, f"MF should survive sparse CF regime; reason={reason}"
 
 
+def test_filter_keeps_mf_at_realistic_cf_sparsity():
+    """Regression: previous floor was 0.95 which filtered out MovieLens-1M
+    (sparsity ≈ 0.949) and most retail / catalogue datasets (typically
+    0.80–0.95). 0.90 floor keeps the realistic CF regime."""
+    mf = next(m for m in _EMBEDDING_FAMILIES if "mf" in m["short_name"])
+    profile = {"n_rows": 50_000, "sparsity": 0.90, "target_type": "binary"}
+    keep, _ = _filter_by_profile(mf, profile)
+    assert keep, "MF must survive at sparsity = 0.90 (the new floor)"
+
+
 def test_filter_drops_mf_on_dense_data():
     profile = {
         "n_rows": 50_000,
@@ -679,6 +809,33 @@ def test_filter_drops_non_xgb_on_continuous_target():
         else:
             assert not keep, f"continuous target should drop {method['short_name']}"
             assert "continuous" in reason.lower()
+
+
+def test_resize_sequential_for_continuous_target_swaps_to_regressor():
+    """The filter step keeps SASRec/HRNN under continuous targets on the
+    promise the resize step swaps `*_classifier` → `*_regressor`. Verify
+    that swap actually happens — otherwise the filter is silently lying
+    and we'd train a classifier on continuous data."""
+    method = {
+        "short_name": "sasrec_sequential",
+        "recommender_type": "sequential",
+        "scorer_type": "sequential",
+        "estimator_type": "sequential",
+        "estimator_config": {
+            "estimator_type": "sequential",
+            "sequential": {
+                "model_type": "sasrec_classifier",
+                "params": {"hidden_units": 16, "max_len": 10, "epochs": 2},
+            },
+        },
+        "recommender_params": {"max_len": 10},
+    }
+    profile = {"n_rows": 50_000, "target_type": "continuous"}
+    resized = _resize_for_data_scale(method, profile)
+    assert resized["estimator_config"]["sequential"]["model_type"] == "sasrec_regressor", (
+        f"continuous target should swap classifier→regressor; got "
+        f"{resized['estimator_config']['sequential']['model_type']!r}"
+    )
 
 
 def test_resize_xgb_for_continuous_target_swaps_ml_task():
@@ -739,8 +896,21 @@ def test_data_aware_methods_drops_then_resizes(binary_reward_paths, session):
 
 
 def test_sweep_auto_uses_data_aware_path(split_bundle):
-    """methods='auto' on a long_interactions bundle should now report
-    data-aware drops in the response payload."""
+    """methods='auto' on a long_interactions bundle MUST report data-aware
+    filtering in the response payload — not just status==ok with no
+    evidence of filtering. The split_bundle fixture is binary_reward
+    (5000 users × 3 items × 1 row each → tiny tier, sparsity ≈ 0.33),
+    which is a known-poor fit for embedding methods. We therefore expect:
+
+      - status == ok (the filter doesn't error on this shape — XGBoost
+        survives even at tiny scale)
+      - n_dropped_by_data_profile >= 1 (at least one embedding family
+        gets filtered out for being below the n_rows or sparsity floor)
+      - dropped_by_data_profile rows include a `reason` string
+
+    Without these stronger assertions the test could pass even if the
+    data-aware path was bypassed entirely.
+    """
     session = split_bundle
     result = TOOL_SWEEP_METHODS.fn(
         bundle_id="b",
@@ -750,17 +920,18 @@ def test_sweep_auto_uses_data_aware_path(split_bundle):
         eval_top_k=5,
         session=session,
     )
-    # Data-aware filter is wired in. Either we got real metrics back (unlikely
-    # on this fixture since most methods get filtered) OR we got
-    # AutoSweepEmptyAfterFilter; both are acceptable as long as
-    # n_dropped_by_data_profile is reported.
-    if result["status"] == "ok":
-        assert "n_dropped_by_data_profile" in result["data"]
-    else:
-        assert (
-            result.get("category") in ("auto_sweep_empty_after_filter", None)
-            or "data_profile" in str(result.get("message", "")).lower()
-        )
+    assert result["status"] == "ok", result
+    data = result["data"]
+    assert "n_dropped_by_data_profile" in data
+    assert data["n_dropped_by_data_profile"] >= 1, (
+        f"Expected the data-aware filter to drop at least one method on the "
+        f"binary_reward fixture; got n_dropped_by_data_profile="
+        f"{data['n_dropped_by_data_profile']}. Either the filter isn't running "
+        f"or its rules no longer match this fixture's shape."
+    )
+    # Each dropped entry carries a reason explaining which rule fired.
+    for drop in data["dropped_by_data_profile"]:
+        assert drop.get("reason"), f"data-profile drop missing reason: {drop}"
 
 
 def test_normalise_method_fills_defaults():

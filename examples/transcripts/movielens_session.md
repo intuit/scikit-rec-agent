@@ -1,6 +1,6 @@
 # MovieLens-1M session — captured transcript
 
-_Captured 2026-05-08 03:16 PDT via `private/run_movielens_session.py` against the IntuitLLM gateway (model=gpt-4o-mini-2024-07-18-oai)._
+_Captured 2026-05-08 03:16 PDT (model: gpt-4o-mini, 2024-07-18 snapshot)._
 
 _Sample data: 300 random users from `data/raw/ratings.dat` (MovieLens-1M, binarised at rating ≥ 4)._
 

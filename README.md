@@ -32,13 +32,15 @@ for event in agent.chat_turn("I have click data at /data/interactions.csv — he
     ...
 ```
 
-See [`examples/`](./examples/) for:
+See [`examples/customizations/`](./examples/customizations/) for:
 - `custom_tool.py` — register a user-defined tool
 - `custom_prompt.py` — extend or replace the system prompt
 - `custom_llm.py` — plug in your company's internal LLM via the `BaseLLM` protocol
 - `custom_frontend.py` — drive the agent from Jupyter / Slack / web
-- `movielens_session.md` — captured transcript of the **sweep flow** (compare 7 methods on MovieLens-1M)
-- `movielens_hierarchical_session.md` — captured transcript of the **one-model design flow** (walk through the picker step by step on the same data)
+
+See [`examples/transcripts/`](./examples/transcripts/) for full captured chat sessions:
+- `movielens_session.md` — the **sweep flow**: compare 7 methods on MovieLens-1M
+- `movielens_hierarchical_session.md` — the **one-model design flow**: walk through the picker step by step on the same data
 
 ## What it does
 
@@ -88,7 +90,7 @@ What happens:
 
 The auto-sweep table is **data-aware** by default (`methods="auto"`): MF only runs in the high-sparsity regime, embedding methods only when n_rows ≥ 5K, sequential only with timestamps. Hyperparameters are tier-sized to your data scale. Pass `methods="all"` to override the filter and run every entry as-is.
 
-See [`examples/movielens_session.md`](examples/movielens_session.md) — 7 methods on MovieLens-1M, SASRec wins with NDCG@10 ≈ 0.021.
+See [`examples/transcripts/movielens_session.md`](examples/transcripts/movielens_session.md) — 7 methods on MovieLens-1M, SASRec wins with NDCG@10 ≈ 0.021.
 
 ### Path B — Design one good model, with help
 
@@ -112,7 +114,7 @@ What happens — the agent walks the **hierarchical flow** via `list_compatible_
 
 **Uplift gets one extra step.** Picking `recommender_type=uplift` adds `required_recommender_params` to the terminal payload — `control_item_id` (which ITEM_ID is the control / no-recommendation case?) and `mode` (T-Learner / S-Learner / X-Learner, each with its own triple). Both are user-supplied; the agent won't silently default them. `train_with_defaults` is blocked for uplift; you go through `train_with_overrides`.
 
-See [`examples/movielens_hierarchical_session.md`](examples/movielens_hierarchical_session.md) for a real walk-through on MovieLens-1M.
+See [`examples/transcripts/movielens_hierarchical_session.md`](examples/transcripts/movielens_hierarchical_session.md) for a real walk-through on MovieLens-1M.
 
 ### Sweep vs design — which to pick
 

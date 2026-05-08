@@ -75,6 +75,11 @@ class Session:
     loaded_datasets: dict[str, DatasetBundle] = field(default_factory=dict)
     trained_models: dict[str, ModelHandle] = field(default_factory=dict)
     failure_history: list[FailureRecord] = field(default_factory=list)
+    # Sweep-side deterministic-id → train_model auto-id alias. Lets
+    # sweep_methods cache "have I trained this (bundle, config) before?"
+    # without mutating the keys of trained_models, so the model_id that
+    # train_model returns to its caller stays stable.
+    sweep_cache: dict[str, str] = field(default_factory=dict)
     messages: list[dict[str, Any]] = field(default_factory=list)
     # URLs the URL-echo check treats as trusted: anything the user typed or
     # pasted this session, plus URLs present in the agent's system prompt

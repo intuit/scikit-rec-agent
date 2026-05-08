@@ -138,10 +138,28 @@ def _op_aggregate_to_sequences(
 
 
 def _op_parse_timestamp(df: pd.DataFrame, timestamp_col: str) -> pd.DataFrame:
+    """Parse a timestamp column to canonical Unix-second TIMESTAMP.
+
+    pandas coerces unparseable timestamp values to ``NaT``, which then
+    silently becomes ``INT64_MIN`` (-9223372036854775808) when cast to
+    int64. We catch that explicitly: any rows with NaT after coercion
+    raise a ValueError naming the column and the count of bad rows so
+    the caller (transform_data tool) can surface it to the user.
+    """
     out = df.copy()
-    out["TIMESTAMP"] = pd.to_datetime(out[timestamp_col], errors="coerce")
-    out["TIMESTAMP"] = out["TIMESTAMP"].astype("int64") // 10**9
-    out["TIMESTAMP"] = out["TIMESTAMP"].astype(str)
+    parsed = pd.to_datetime(out[timestamp_col], errors="coerce")
+    n_invalid = int(parsed.isna().sum())
+    if n_invalid > 0:
+        # Inspect a few of the bad source values to make the error actionable.
+        bad_mask = parsed.isna()
+        sample = out.loc[bad_mask, timestamp_col].head(3).tolist()
+        raise ValueError(
+            f"timestamp_column '{timestamp_col}' has {n_invalid} unparseable "
+            f"value(s) (e.g. {sample!r}). pandas coerces these to NaT, which "
+            f"becomes INT64_MIN when cast to int64 — fix or drop the bad "
+            f"rows before transform_data."
+        )
+    out["TIMESTAMP"] = (parsed.astype("int64") // 10**9).astype(str)
     if timestamp_col != "TIMESTAMP" and timestamp_col in out.columns:
         out = out.drop(columns=[timestamp_col])
     return out

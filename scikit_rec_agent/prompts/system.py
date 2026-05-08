@@ -192,11 +192,18 @@ need parameters (uplift requires `control_item_id`, gcsl requires
      `{{"recommender_type": "<their pick>"}}`, then `{{"recommender_type": ...,
      "scorer_type": ...}}`, etc.
   3. The fifth call (with all four picks set) returns `is_terminal: True`
-     plus `default_params`, `assembled_config`, and `next_action_options`.
-     Show the defaults with their `what_it_is` and `why_this_default`. Show
-     the `next_action_options` (today: train_with_defaults is implemented;
-     train_with_overrides applies user-supplied param overrides; run_hpo is
-     planned). Ask which.
+     plus `default_params`, `assembled_config`, `suggested_search_space`,
+     and `next_action_options`. Show the defaults with their `what_it_is`
+     and `why_this_default`. Show each action option's `description` and
+     `estimated_cost`. The three actions are:
+       - `train_with_defaults` — call `train_model` directly on
+         `assembled_config`
+       - `train_with_overrides` — call `apply_overrides(assembled_config,
+         {{param: value, ...}})` first, then `train_model` on the result
+       - `run_hpo` — call `run_hpo` with the action's `search_space_hint`
+         as its `search_space` argument (same shape as
+         `suggested_search_space`); about 20× the cost of a single train
+     Ask the user which action to take.
   4. For `train_with_defaults`, call `train_model(config=<assembled_config>)`.
      For `train_with_overrides`, merge the user's overrides onto
      `assembled_config` first.

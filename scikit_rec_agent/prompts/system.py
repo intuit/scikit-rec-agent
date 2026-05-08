@@ -162,22 +162,46 @@ need parameters (uplift requires `control_item_id`, gcsl requires
 - Then `create_datasets`. Use `column_mapping` for trivial renames; use
   `transform_data` for reshapes (pivot, melt, aggregate, dedupe).
 - Then `split_data` (pick the right strategy).
-- Then `train_model` if you already know which method to use. For a method
-  comparison, follow the explicit-selection flow:
+- Then `train_model` if the user already specified the method.
+  Otherwise pick the right flow based on intent:
+
+  **A. Compare multiple methods on the same data → `sweep_methods`.**
   1. Call `sweep_methods(methods="list", bundle_id=...)` to get the menu of
      methods compatible with the user's data shape.
   2. Surface the numbered list verbatim to the user: each option's
      `short_name`, recommender/scorer/estimator triple, and the key
-     hyperparameters. Briefly describe each (tabular XGBoost, embedding
-     families, sequential, etc.) so the user can pick informed.
+     hyperparameters. Briefly describe each so the user can pick informed.
   3. Ask which option(s) to run. Accept "all" / "every" / explicit numbers
      or short_names.
   4. Re-call `sweep_methods` with `methods=["short_name_1", ...]` (or
-     `methods="all"` if the user said all).
-  Skip the listing step only when the user upfront stated "try all" or
-  asked for a `broad` sweep. `sweep_methods` filters incompatible combos
-  before training and is idempotent, so re-running it after a partial
-  failure is safe.
+     `methods="all"` if the user said all). Skip the listing step only when
+     the user upfront stated "try all" or asked for a `broad` sweep.
+     `sweep_methods` filters incompatible combos before training and is
+     idempotent, so re-running it after a partial failure is safe.
+
+  **B. Design ONE good model with help → `list_compatible_options` (hierarchical flow).**
+  Use this when the user wants pedagogical, step-by-step guidance on what
+  the choices mean rather than a bulk comparison. Walk the four discrete
+  dimensions in order — recommender_type → scorer_type → estimator_type →
+  model_type — calling `list_compatible_options` once per step:
+  1. Start with `list_compatible_options(bundle_id=..., current_choices={{}})`.
+     The tool returns a `next_dimension` and a list of `options`, each with
+     `what_it_is` / `when_to_pick` / `tradeoff_vs_alternatives`. Surface the
+     numbered list with the explanations VERBATIM (don't paraphrase or invent).
+  2. Ask the user to pick one. Repeat the call with `current_choices` updated:
+     `{{"recommender_type": "<their pick>"}}`, then `{{"recommender_type": ...,
+     "scorer_type": ...}}`, etc.
+  3. The fifth call (with all four picks set) returns `is_terminal: True`
+     plus `default_params`, `assembled_config`, and `next_action_options`.
+     Show the defaults with their `what_it_is` and `why_this_default`. Show
+     the `next_action_options` (today: train_with_defaults is implemented;
+     train_with_overrides applies user-supplied param overrides; run_hpo is
+     planned). Ask which.
+  4. For `train_with_defaults`, call `train_model(config=<assembled_config>)`.
+     For `train_with_overrides`, merge the user's overrides onto
+     `assembled_config` first.
+  5. If a step returns `options: []` with `why_no_options`, tell the user
+     why and offer to back up to `back_to_step`.
 - On any error envelope returned by `train_model`, immediately call
   `diagnose_training_failure` rather than guessing a fix manually. Pass the
   error envelope verbatim. The diagnosis includes a ranked list of candidate

@@ -37,11 +37,12 @@ See [`examples/`](./examples/) for:
 - `custom_prompt.py` — extend or replace the system prompt
 - `custom_llm.py` — plug in your company's internal LLM via the `BaseLLM` protocol
 - `custom_frontend.py` — drive the agent from Jupyter / Slack / web
-- `movielens_session.md` — annotated end-to-end transcript
+- `movielens_session.md` — captured transcript of the **sweep flow** (compare 7 methods on MovieLens-1M)
+- `movielens_hierarchical_session.md` — captured transcript of the **one-model design flow** (walk through the picker step by step on the same data)
 
 ## What it does
 
-Fourteen tools cover the full scikit-rec workflow — from raw data to a saved, tuned model:
+Fifteen tools cover the full scikit-rec workflow — from raw data to a saved, tuned model:
 
 | Tool | What it does |
 |---|---|
@@ -50,6 +51,7 @@ Fourteen tools cover the full scikit-rec workflow — from raw data to a saved, 
 | `transform_data` | Reshapes a raw file into one of nine scikit-rec contracts (long, long-with-timestamp, long-multi-reward, wide multi-output, multiclass, prebuilt sequences, sessions, users features, items features). Auto-detects source shape; applies pivot, melt, aggregate, dedupe, and cast as needed. |
 | `create_datasets` | Builds scikit-rec Dataset handles from file paths. Auto-generates schemas from dtypes; auto-dispatches to `InteractionsDataset` / `InteractionMultiOutputDataset` / `InteractionMultiClassDataset`. |
 | `split_data` | Splits a bundle into train/valid/test using temporal, leave-last-n-per-user, random-split-per-user, leave-n-users-out, or random-split. Errors loudly on degenerate splits (e.g. per-user split on one-row-per-user data). |
+| `list_compatible_options` | Drives the **hierarchical model-design flow**: walks the user through recommender_type → scorer_type → estimator_type → model_type → hyperparameters one step at a time. Each option carries a `what_it_is / when_to_pick / tradeoff_vs_alternatives` triple. The terminal step returns an `assembled_config` that plugs straight into `train_model`. |
 | `train_model` | Trains a recommender from a `RecommenderConfig` dict via scikit-rec's factory. Failure envelopes carry a `category` from the diagnose registry plus a one-line `hint`. |
 | `sweep_methods` | Trains and evaluates multiple methods on the same bundle and returns a ranked leaderboard. Modes: `list` (menu only), `auto` (data-aware filter + hyperparameter resize), `all` (every entry), `broad` (every capability-compatible triple), or explicit method dicts / short_names. Idempotent across re-runs. |
 | `diagnose_training_failure` | Pattern-matches a failed `train_model` envelope against a 14-pattern registry and returns ranked candidate fixes with structured actions. Auto-retries the top safe fix; bounded by `max_retries` to prevent loops. |
@@ -61,6 +63,99 @@ Fourteen tools cover the full scikit-rec workflow — from raw data to a saved, 
 | `load_model` | Restores a saved model into the current session for further use. |
 
 The system prompt is built at import time from scikit-rec's live enum maps, so new recommender / scorer / estimator types get picked up automatically.
+
+## How to talk to it
+
+The agent expects natural language. There's no DSL, no required prompt structure — just describe your data and goal. Two main paths cover most workflows; the agent picks based on what you ask for.
+
+### Path A — Compare-everything sweep
+
+For "I want results — show me which method works best on my data."
+
+```
+"I have click data at /data/interactions.csv with users in users.csv
+ and items in items.csv. Compare a few methods and tell me which works
+ best."
+```
+
+What happens:
+1. `profile_data` + `validate_data` on each file
+2. `transform_data` if the shape doesn't match the target contract
+3. `create_datasets` + `split_data`
+4. `sweep_methods(methods="list")` — agent surfaces the menu (XGBoost, MF, NCF, Two-Tower, DCN, NFM, SASRec — whichever fit your data) with brief descriptions, asks you to pick or say "all"
+5. `sweep_methods(methods=[...])` — trains + evaluates the picked methods, returns a ranked leaderboard
+6. Agent reports the winner; offers to save / run HPO
+
+The auto-sweep table is **data-aware** by default (`methods="auto"`): MF only runs in the high-sparsity regime, embedding methods only when n_rows ≥ 5K, sequential only with timestamps. Hyperparameters are tier-sized to your data scale. Pass `methods="all"` to override the filter and run every entry as-is.
+
+See [`examples/movielens_session.md`](examples/movielens_session.md) — 7 methods on MovieLens-1M, SASRec wins with NDCG@10 ≈ 0.021.
+
+### Path B — Design one good model, with help
+
+For "I want to *understand* the choice, not just see a leaderboard."
+
+```
+"Walk me through how to choose a recommender for this data. I want
+ to understand the design space."
+```
+
+What happens — the agent walks the **hierarchical flow** via `list_compatible_options`:
+
+1. **`recommender_type`** — Ranking? Sequential? Uplift? Bandits? Each option carries a `what_it_is / when_to_pick / tradeoff_vs_alternatives` triple. Options that don't fit your data (e.g. sequential when there's no TIMESTAMP) are filtered out automatically.
+2. **`scorer_type`** — given your previous pick, what scoring strategy applies. Universal / independent / multioutput / multiclass / sequential / hierarchical, again with explanations.
+3. **`estimator_type`** — tabular (XGBoost) / embedding (MF, NCF, Two-Tower, DCN, NFM) / sequential (SASRec, HRNN). Filtered by data size (embedding needs ≥5K rows, etc).
+4. **`model_type`** — pick the specific family.
+5. **Terminal step** — agent shows the data-tier-sized default hyperparameters with `what_it_is` and `why_this_default`. Three actions:
+   - `train_with_defaults` — accept the sized defaults, train one model
+   - `train_with_overrides` — change specific hyperparameters before training
+   - `run_hpo` — search the pre-suggested ranges via Optuna
+
+**Uplift gets one extra step.** Picking `recommender_type=uplift` adds `required_recommender_params` to the terminal payload — `control_item_id` (which ITEM_ID is the control / no-recommendation case?) and `mode` (T-Learner / S-Learner / X-Learner, each with its own triple). Both are user-supplied; the agent won't silently default them. `train_with_defaults` is blocked for uplift; you go through `train_with_overrides`.
+
+See [`examples/movielens_hierarchical_session.md`](examples/movielens_hierarchical_session.md) for a real walk-through on MovieLens-1M.
+
+### Sweep vs design — which to pick
+
+| Goal | Path |
+|---|---|
+| "What works best on my data?" | A — sweep |
+| "Should I use sequential or ranking? Help me choose." | B — design |
+| "Compare 3 specific methods I picked." | A — sweep with explicit `methods=[...]` |
+| "I want uplift. Help me set it up." | B — design |
+| "Bulk compare everything and run HPO on the winner." | A — sweep, then `run_hpo` on the winner |
+| "Train one specific model I already have a config for." | Skip both — use `train_model` directly |
+
+### Recover from a training failure
+
+```
+"train_model errored — here's the envelope: {error_type: ValueError,
+ message: 'Input contains NaN', ...}. Help."
+```
+
+The agent calls `diagnose_training_failure`, pattern-matches the error against a 14-pattern registry, returns ranked candidate fixes with structured actions. Bounded retries (max 2 per `model_name`) prevent loops; if the category is `unknown`, it surfaces the raw error to you instead of guessing.
+
+### What the agent will ask back
+
+The agent asks targeted clarifying questions when the data or goal is genuinely ambiguous:
+
+- "Which column is your timestamp?" — when `profile_data`'s heuristic role detection is uncertain
+- "Ranking or sequential? Your data has timestamps so both are valid" — when a design choice has real tradeoffs
+- "Your `gender` column is `M`/`F` strings. Drop it, label-encode (0/1), or one-hot?" — when `train_model` would otherwise fail on object-dtype features
+- "What's your control item ID for uplift?" — when the design path lands on uplift and there's no sensible default
+
+It does **not** ask you to write any code. Tool calls happen behind the scenes; you only see them if you watch `chat_turn`'s event stream.
+
+### Reading the output
+
+Every tool returns a JSON envelope. The shape is:
+
+```json
+{"status": "ok", "data": {...}}                                    // success
+{"status": "error", "error_type": "...", "message": "...",         // failure
+ "hint": "actionable next step", "category": "diagnostics-bucket"}
+```
+
+`category` and `hint` are populated by the diagnose registry — when present they tell you exactly what failed and how to react. Sweep leaderboards sort by your primary metric; rows with `status: "error"` are kept in the leaderboard with their per-method failure category for later inspection.
 
 ## Hallucination safeguards
 

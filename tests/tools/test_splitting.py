@@ -59,6 +59,43 @@ def test_split_data_rejects_unknown_strategy(binary_reward_paths, session):
     assert result["error_type"] == "InvalidStrategy"
 
 
+def test_split_data_degenerate_per_user_on_wide_data(tmp_path, session):
+    """One row per user + per-user split → 0 valid rows. The tool must
+    detect this and return a structured error explaining the cause and
+    recommending a different strategy, rather than silently writing an
+    empty validation file."""
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "USER_ID": [f"u{i}" for i in range(20)],
+            "ITEM_payroll": [1, 0] * 10,
+            "ITEM_invoice": [0, 1] * 10,
+            "feat1": list(range(20)),
+        }
+    )
+    p = tmp_path / "wide.csv"
+    df.to_csv(p, index=False)
+
+    TOOL_CREATE_DATASETS.fn(
+        bundle_id="wide",
+        interactions_path=str(p),
+        session=session,
+    )
+    result = TOOL_SPLIT_DATA.fn(
+        bundle_id="wide",
+        strategy="random_split_per_user",
+        valid_fraction=0.2,
+        session=session,
+        random_state=1,
+    )
+    assert result["status"] == "error"
+    assert result["error_type"] == "DegenerateSplit"
+    assert result["category"] == "degenerate_split"
+    # The message must point at the actual fix
+    assert "leave_n_users_out" in result["message"] or "random_split" in result["message"]
+
+
 def test_split_data_clears_stale_test_on_resplit(binary_reward_paths, session):
     # Regression: first split with test_fraction>0 populates test_interactions.
     # A second split with test_fraction=0 must clear that stale handle — else

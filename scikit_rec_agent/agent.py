@@ -85,6 +85,10 @@ class Agent:
         self.session = session if session is not None else Session()
         self.enable_safeguards = enable_safeguards
         self._tools_by_name = {t.name: t for t in self.tools}
+        # Seed the trusted-URL set with URLs the system prompt itself contains
+        # (e.g. project README, doc links). The model echoing those back is
+        # not a hallucination — it is repeating its own context.
+        self.session.user_supplied_urls.update(URL_PATTERN.findall(self.system_prompt))
 
     # ----- public API -----
 
@@ -147,7 +151,7 @@ class Agent:
                     {
                         "type": "tool_result",
                         "tool_use_id": call.id,
-                        "content": json.dumps(result),
+                        "content": json.dumps(result, default=_json_safe_default),
                     }
                 )
                 yield AgentEvent(
@@ -210,6 +214,32 @@ class Agent:
             return err("ArgumentError", str(e), hint="Check the tool's input_schema for required fields.")
         except Exception as e:
             return err(type(e).__name__, str(e))
+
+
+def _json_safe_default(o: Any) -> Any:
+    """Coerce non-JSON-serializable values (numpy ints/floats, arrays, dates)
+    into JSON-friendly forms before they cross the LLM boundary. numpy scalars
+    expose .item() returning a Python scalar; everything else falls back to
+    str. We do this at the agent loop boundary rather than per-tool because
+    scikit-rec's split-info dicts and pandas grouping aggregates routinely
+    leak np.int64 / np.float64 values that no caller can be expected to
+    sanitize manually."""
+    if hasattr(o, "item") and callable(getattr(o, "item")):
+        try:
+            return o.item()
+        except (ValueError, TypeError):
+            pass
+    if hasattr(o, "tolist") and callable(getattr(o, "tolist")):
+        try:
+            return o.tolist()
+        except (ValueError, TypeError):
+            pass
+    if hasattr(o, "isoformat") and callable(getattr(o, "isoformat")):
+        try:
+            return o.isoformat()
+        except (ValueError, TypeError):
+            pass
+    return str(o)
 
 
 def _build_assistant_content(text: str, tool_calls: list[ToolCall]) -> list[dict[str, Any]]:

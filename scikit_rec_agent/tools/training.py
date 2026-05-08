@@ -63,6 +63,7 @@ def _train_model(
     items_path: str | None = None,
     column_mapping: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    from scikit_rec_agent.tools.diagnose import _quick_diagnose, record_failure
     from skrec.orchestrator import create_recommender_pipeline
 
     if not isinstance(config, dict):
@@ -70,6 +71,15 @@ def _train_model(
 
     config = dict(config)
     config.setdefault("recommender_params", {})
+
+    bundle_args = {
+        "bundle_id": bundle_id,
+        "interactions_path": interactions_path,
+        "users_path": users_path,
+        "items_path": items_path,
+        "column_mapping": column_mapping,
+    }
+    bundle_args = {k: v for k, v in bundle_args.items() if v is not None}
 
     bundle, err_env = _resolve_bundle(bundle_id, interactions_path, users_path, items_path, column_mapping, session)
     if err_env is not None:
@@ -79,23 +89,55 @@ def _train_model(
     try:
         recommender = create_recommender_pipeline(config)
     except (ValueError, TypeError, NotImplementedError) as e:
-        return err(type(e).__name__, str(e), hint="Check recommender_type, scorer_type, and estimator_config.")
+        diagnosis = _quick_diagnose(e)
+        envelope = err(
+            type(e).__name__,
+            str(e),
+            hint=diagnosis.first_fix_description or "Check recommender_type, scorer_type, and estimator_config.",
+            category=diagnosis.category,
+        )
+        record_failure(session, model_name, config, bundle_args, envelope, diagnosis)
+        return envelope
+
+    import inspect
+
+    accepted_train_kwargs = set(inspect.signature(recommender.train).parameters)
 
     train_kwargs: dict[str, Any] = {"interactions_ds": bundle.interactions}
     if bundle.users is not None:
         train_kwargs["users_ds"] = bundle.users
     if bundle.items is not None:
         train_kwargs["items_ds"] = bundle.items
-    if bundle.valid_interactions is not None:
+    # Per-recommender-class kwarg differences: SequentialRecommender derives
+    # its validation split internally via `use_validation: bool` and rejects
+    # `valid_interactions_ds`. Filter to what the actual train() accepts so
+    # the recommender_type doesn't have to be hardcoded here.
+    if bundle.valid_interactions is not None and "valid_interactions_ds" in accepted_train_kwargs:
         train_kwargs["valid_interactions_ds"] = bundle.valid_interactions
-    if bundle.users is not None and bundle.valid_interactions is not None:
+    if (
+        bundle.users is not None
+        and bundle.valid_interactions is not None
+        and "valid_users_ds" in accepted_train_kwargs
+    ):
         train_kwargs["valid_users_ds"] = bundle.users
+    if "use_validation" in accepted_train_kwargs and bundle.valid_interactions is not None:
+        # Sequential recommenders take a bool flag instead of a separate
+        # validation dataset — they derive the split from interactions_ds.
+        train_kwargs["use_validation"] = True
 
     started = time.time()
     try:
         recommender.train(**train_kwargs)
     except Exception as e:
-        return err(type(e).__name__, f"Training failed: {e}")
+        diagnosis = _quick_diagnose(e)
+        envelope = err(
+            type(e).__name__,
+            f"Training failed: {e}",
+            hint=diagnosis.first_fix_description,
+            category=diagnosis.category,
+        )
+        record_failure(session, model_name, config, bundle_args, envelope, diagnosis)
+        return envelope
     elapsed = time.time() - started
 
     recommender_type = config.get("recommender_type", "unknown")

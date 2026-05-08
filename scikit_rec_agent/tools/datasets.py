@@ -30,6 +30,8 @@ _REQUIRED_INTERACTIONS_TYPES = {"USER_ID": "str", "ITEM_ID": "str", "OUTCOME": "
 _REQUIRED_USERS_TYPES = {"USER_ID": "str"}
 _REQUIRED_ITEMS_TYPES = {"ITEM_ID": "str"}
 
+_DATASET_TYPES = ("interactions", "interaction_multioutput", "interaction_multiclass")
+
 
 def _pandas_to_schema_type(dtype) -> str:
     if pd.api.types.is_integer_dtype(dtype):
@@ -58,11 +60,30 @@ def _generate_schema(df: pd.DataFrame, file_type: str = "interactions") -> dict[
         if c.startswith("OUTCOME_"):
             columns.append({"name": c, "type": "float"})
             continue
+        # Wide multi-output: ITEM_<target> columns are binary/float labels,
+        # one per target. scikit-rec's MultioutputScorer reads them as float.
+        if c.startswith("ITEM_") and c != "ITEM_ID":
+            columns.append({"name": c, "type": "float"})
+            continue
         if c in overrides:
             columns.append({"name": c, "type": overrides[c]})
             continue
         columns.append({"name": c, "type": _pandas_to_schema_type(df[c].dtype)})
     return {"columns": columns}
+
+
+def _detect_dataset_type(df: pd.DataFrame) -> str:
+    """Pick the right scikit-rec Dataset class for an interactions file based
+    on its columns. Falls back to plain `interactions` (long-format) when no
+    other shape is recognised — that's what the original tool always did.
+    """
+    cols = set(df.columns)
+    item_star = [c for c in df.columns if c.startswith("ITEM_") and c != "ITEM_ID"]
+    if "USER_ID" in cols and "ITEM_ID" not in cols and len(item_star) >= 2:
+        return "interaction_multioutput"
+    if "USER_ID" in cols and "ITEM_ID" in cols and "OUTCOME" not in cols and not item_star:
+        return "interaction_multiclass"
+    return "interactions"
 
 
 def _rename_and_write(src_path: str, column_mapping: dict[str, str], tmp_dir: str) -> str:
@@ -104,13 +125,30 @@ def _create_datasets(
     test_interactions_path: str | None = None,
     column_mapping: dict[str, str] | None = None,
     schemas: dict[str, str] | None = None,
+    dataset_type: str | None = None,
 ) -> dict[str, Any]:
-    from skrec.dataset.interactions_dataset import InteractionsDataset
+    from skrec.dataset.interactions_dataset import (
+        InteractionMultiClassDataset,
+        InteractionMultiOutputDataset,
+        InteractionsDataset,
+    )
     from skrec.dataset.items_dataset import ItemsDataset
     from skrec.dataset.users_dataset import UsersDataset
 
+    if dataset_type is not None and dataset_type not in _DATASET_TYPES:
+        return err(
+            "InvalidDatasetType",
+            f"Unknown dataset_type '{dataset_type}'. Valid: {list(_DATASET_TYPES)}",
+        )
+
     if not os.path.exists(interactions_path):
         return err("FileNotFoundError", f"interactions_path not found: {interactions_path}")
+
+    _DATASET_CLASS = {
+        "interactions": InteractionsDataset,
+        "interaction_multioutput": InteractionMultiOutputDataset,
+        "interaction_multiclass": InteractionMultiClassDataset,
+    }
 
     schemas = schemas or {}
     tmp_dir = tempfile.mkdtemp(prefix=f"skragent_{bundle_id}_")
@@ -122,10 +160,12 @@ def _create_datasets(
 
     try:
         inter_path, inter_df = _prepare_source(interactions_path, column_mapping, tmp_dir)
+        resolved_dataset_type = dataset_type or _detect_dataset_type(inter_df)
+        ds_cls = _DATASET_CLASS[resolved_dataset_type]
         inter_schema = _write_schema(inter_df, "interactions", tmp_dir, schemas.get("interactions"))
         schema_paths["interactions"] = inter_schema
         source_paths["interactions"] = inter_path
-        interactions_ds = InteractionsDataset(data_location=inter_path, client_schema_path=inter_schema)
+        interactions_ds = ds_cls(data_location=inter_path, client_schema_path=inter_schema)
 
         users_ds = None
         if users_path:
@@ -153,7 +193,7 @@ def _create_datasets(
                 return err("FileNotFoundError", f"valid_interactions_path not found: {valid_interactions_path}")
             v_path, _ = _prepare_source(valid_interactions_path, column_mapping, tmp_dir)
             source_paths["valid_interactions"] = v_path
-            valid_ds = InteractionsDataset(data_location=v_path, client_schema_path=inter_schema)
+            valid_ds = ds_cls(data_location=v_path, client_schema_path=inter_schema)
 
         test_ds = None
         if test_interactions_path:
@@ -161,7 +201,7 @@ def _create_datasets(
                 return err("FileNotFoundError", f"test_interactions_path not found: {test_interactions_path}")
             t_path, _ = _prepare_source(test_interactions_path, column_mapping, tmp_dir)
             source_paths["test_interactions"] = t_path
-            test_ds = InteractionsDataset(data_location=t_path, client_schema_path=inter_schema)
+            test_ds = ds_cls(data_location=t_path, client_schema_path=inter_schema)
     except Exception as e:
         return err(type(e).__name__, str(e))
 
@@ -174,12 +214,14 @@ def _create_datasets(
         test_interactions=test_ds,
         schema_paths=schema_paths,
         source_paths=source_paths,
+        dataset_type=resolved_dataset_type,
     )
     session.loaded_datasets[bundle_id] = bundle
 
     return ok(
         {
             "bundle_id": bundle_id,
+            "dataset_type": resolved_dataset_type,
             "schema_paths": schema_paths,
             "columns": list(inter_df.columns),
             "n_interactions": int(len(inter_df)),
@@ -218,6 +260,16 @@ TOOL_CREATE_DATASETS = Tool(
                 "type": "object",
                 "description": (
                     "Optional pre-written YAML schema paths keyed by file_type ('interactions', 'users', 'items')."
+                ),
+            },
+            "dataset_type": {
+                "type": "string",
+                "enum": list(_DATASET_TYPES),
+                "description": (
+                    "Which scikit-rec Dataset class to instantiate for the interactions file. "
+                    "Auto-detected from columns when omitted: ≥2 ITEM_* columns + no ITEM_ID → "
+                    "'interaction_multioutput'; ITEM_ID + no OUTCOME → 'interaction_multiclass'; "
+                    "else 'interactions' (long format with USER_ID/ITEM_ID/OUTCOME)."
                 ),
             },
         },

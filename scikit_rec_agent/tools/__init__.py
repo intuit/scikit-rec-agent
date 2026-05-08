@@ -43,6 +43,7 @@ def err(
     error_type: str,
     message: str,
     hint: str | None = None,
+    category: str | None = None,
 ) -> dict[str, Any]:
     envelope: dict[str, Any] = {
         "status": "error",
@@ -51,6 +52,8 @@ def err(
     }
     if hint:
         envelope["hint"] = hint
+    if category:
+        envelope["category"] = category
     return envelope
 
 
@@ -65,15 +68,21 @@ def _collect_default_tools() -> list[Tool]:
         TOOL_LOAD_MODEL,
         TOOL_SAVE_MODEL,
     )
+    from scikit_rec_agent.tools.diagnose import TOOL_DIAGNOSE_TRAINING_FAILURE
     from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
     from scikit_rec_agent.tools.training import TOOL_TRAIN_MODEL
+    from scikit_rec_agent.tools.transform import TOOL_TRANSFORM_DATA
 
     return [
         TOOL_PROFILE_DATA,
         TOOL_VALIDATE_DATA,
+        TOOL_TRANSFORM_DATA,
         TOOL_CREATE_DATASETS,
         TOOL_SPLIT_DATA,
         TOOL_TRAIN_MODEL,
+        TOOL_DIAGNOSE_TRAINING_FAILURE,
+        TOOL_SWEEP_METHODS,
         TOOL_EVALUATE_MODEL,
         TOOL_COMPARE_MODELS,
         TOOL_RUN_HPO,
@@ -84,7 +93,7 @@ def _collect_default_tools() -> list[Tool]:
 
 
 def get_default_tools() -> list[Tool]:
-    """Return the 11 default tools. Importing this triggers tool module imports
+    """Return the default tools. Importing this triggers tool module imports
     which require scikit-rec — fine in practice since scikit-rec is a main dep.
     """
     return _collect_default_tools()

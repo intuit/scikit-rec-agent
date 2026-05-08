@@ -47,7 +47,11 @@ def _split_data(
     random_state: int | None = None,
 ) -> dict[str, Any]:
     from skrec.constants import TIMESTAMP_COL, USER_ID_NAME
-    from skrec.dataset.interactions_dataset import InteractionsDataset
+    from skrec.dataset.interactions_dataset import (
+        InteractionMultiClassDataset,
+        InteractionMultiOutputDataset,
+        InteractionsDataset,
+    )
     from skrec.split import (
         leave_last_n_per_user,
         leave_n_users_out,
@@ -126,24 +130,67 @@ def _split_data(
     except Exception as e:
         return err(type(e).__name__, str(e))
 
+    requested_valid = (
+        (valid_fraction is not None and valid_fraction > 0)
+        or (n_valid is not None and n_valid > 0)
+        or (n_valid_users is not None and n_valid_users > 0)
+    )
+    if requested_valid and len(result.valid) == 0:
+        per_user_strategies = ("random_split_per_user", "leave_last_n_per_user")
+        rows_per_user = int(df.groupby(user_col).size().max()) if user_col in df.columns else None
+        if strategy in per_user_strategies and rows_per_user == 1:
+            return err(
+                "DegenerateSplit",
+                (
+                    f"strategy='{strategy}' produced 0 validation rows. The data has "
+                    f"1 row per {user_col} (likely a wide multi-output / multi-class / "
+                    f"feature-table shape), so a per-user split has nothing to hold "
+                    f"out. Use strategy='leave_n_users_out' (with `n_valid_users`) or "
+                    f"strategy='random_split' (with `valid_fraction`) on this shape."
+                ),
+                hint=(
+                    "Wide / one-row-per-user data needs a user-level or row-level split, "
+                    "not a per-user split. Re-call split_data with leave_n_users_out."
+                ),
+                category="degenerate_split",
+            )
+        return err(
+            "DegenerateSplit",
+            (
+                f"strategy='{strategy}' produced 0 validation rows despite a non-zero "
+                f"valid request. Total rows: {len(df)}. This usually means the requested "
+                f"hold-out fraction is too small for the data size, or the strategy is a "
+                f"poor fit for the data shape."
+            ),
+            hint="Try a larger valid_fraction or a different split strategy.",
+            category="degenerate_split",
+        )
+
     tmp_dir = tempfile.mkdtemp(prefix=f"skragent_split_{bundle_id}_")
     inter_schema = bundle.schema_paths.get("interactions")
 
+    _DATASET_CLASS = {
+        "interactions": InteractionsDataset,
+        "interaction_multioutput": InteractionMultiOutputDataset,
+        "interaction_multiclass": InteractionMultiClassDataset,
+    }
+    ds_cls = _DATASET_CLASS.get(bundle.dataset_type, InteractionsDataset)
+
     train_path = os.path.join(tmp_dir, "train.csv")
     result.train.to_csv(train_path, index=False)
-    bundle.interactions = InteractionsDataset(data_location=train_path, client_schema_path=inter_schema)
+    bundle.interactions = ds_cls(data_location=train_path, client_schema_path=inter_schema)
     bundle.source_paths["interactions"] = train_path
 
     valid_path = os.path.join(tmp_dir, "valid.csv")
     result.valid.to_csv(valid_path, index=False)
-    bundle.valid_interactions = InteractionsDataset(data_location=valid_path, client_schema_path=inter_schema)
+    bundle.valid_interactions = ds_cls(data_location=valid_path, client_schema_path=inter_schema)
     bundle.source_paths["valid_interactions"] = valid_path
 
     test_path: str | None = None
     if result.test is not None:
         test_path = os.path.join(tmp_dir, "test.csv")
         result.test.to_csv(test_path, index=False)
-        bundle.test_interactions = InteractionsDataset(data_location=test_path, client_schema_path=inter_schema)
+        bundle.test_interactions = ds_cls(data_location=test_path, client_schema_path=inter_schema)
         bundle.source_paths["test_interactions"] = test_path
     else:
         # Overwrite rather than leave stale handles from a prior split/create.

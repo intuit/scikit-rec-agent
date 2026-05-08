@@ -12,9 +12,24 @@ from scikit_rec_agent.tools import Tool, err, ok
 
 
 def _read(path: str) -> pd.DataFrame:
+    """Read an interactions/users/items CSV or parquet, then re-cast the
+    canonical ID columns to str.
+
+    scikit-rec treats USER_ID and ITEM_ID as categorical strings throughout
+    its schemas. transform_data and create_datasets cast them in-memory,
+    but a CSV roundtrip silently re-infers numeric-looking IDs (e.g. '1',
+    '661') as int64 when read back here. That breaks comparison-based
+    operations later in the eval path with messages like '<' not supported
+    between instances of 'str' and 'int'. Forcing the dtype on read keeps
+    every dataframe the agent loads in lockstep with the schema.
+    """
     if not path or not os.path.exists(path):
         return pd.DataFrame()
-    return pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
+    df = pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
+    for col in ("USER_ID", "ITEM_ID"):
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+    return df
 
 
 def _build_score_items_kwargs(session, handle) -> dict[str, pd.DataFrame]:
@@ -24,6 +39,16 @@ def _build_score_items_kwargs(session, handle) -> dict[str, pd.DataFrame]:
     the same users the logged data refers to. We prefer validation
     interactions; if the bundle has none, we fall back to training
     interactions (which is less honest but keeps the tool functional).
+
+    Embedding estimators (matrix_factorization, two_tower, NCF, DCN, NFM)
+    require a pre-computed `EMBEDDING` column on the users DataFrame to
+    score. The trained estimator already holds those embeddings internally
+    from the fit step — its predict() docstring explicitly supports a
+    "Batch Prediction Mode" where `users=None` means "use my internal
+    embeddings". So when the bundle's recommender wraps an embedding
+    estimator, we omit `users` entirely and let the estimator self-supply.
+    Otherwise the universal scorer errors with `users DataFrame must
+    contain 'EMBEDDING' column for embedding estimators.`
     """
     bundle_id = (handle.datasets_used or {}).get("bundle_id")
     bundle = session.loaded_datasets.get(bundle_id) if bundle_id else None
@@ -36,22 +61,59 @@ def _build_score_items_kwargs(session, handle) -> dict[str, pd.DataFrame]:
     users_df = _read(users_path) if users_path else pd.DataFrame()
     if not inter_df.empty:
         kwargs["interactions"] = inter_df
-    if not users_df.empty:
+    if not users_df.empty and not _has_embedding_estimator(handle):
         kwargs["users"] = users_df
     return kwargs
 
 
-def _build_eval_kwargs_from_validation(session, handle) -> dict[str, Any]:
-    """For the 'simple' evaluator on implicit-feedback data, derive logged_items
-    / logged_rewards from the bundle's validation interactions. Returns {} if
-    validation data isn't available — the evaluator will raise with a clear
-    message in that case.
+def _has_embedding_estimator(handle) -> bool:
+    """True if the recommender on this handle wraps a BaseEmbeddingEstimator."""
+    try:
+        from skrec.estimator.embedding.base_embedding_estimator import BaseEmbeddingEstimator
 
-    Assumes scikit-rec canonical column names (USER_ID, ITEM_ID, OUTCOME).
-    `source_paths` always points at the post-rename CSV (see create_datasets
-    / split_data), so renamed data still lines up here.
+        estimator = getattr(getattr(handle.recommender, "scorer", None), "estimator", None)
+        return isinstance(estimator, BaseEmbeddingEstimator)
+    except Exception:
+        return False
+
+
+def _is_sequential_recommender(handle) -> bool:
+    """True if the recommender's score_items returns shape (n_users, n_items),
+    not (n_rows, n_items). Sequential / hierarchical recommenders aggregate
+    raw interactions into per-user sequences before scoring, so logged arrays
+    must match that per-user N — not the per-row N a tabular / embedding
+    scorer produces."""
+    try:
+        from skrec.recommender.sequential.sequential_recommender import SequentialRecommender
+
+        return isinstance(handle.recommender, SequentialRecommender)
+    except Exception:
+        return False
+
+
+def _build_eval_kwargs_from_validation(session, handle) -> dict[str, Any]:
+    """Build logged_items / logged_rewards from the bundle's validation
+    interactions, shaped to match the recommender's score_items output.
+
+    Two shape regimes:
+
+    - **Per-row** ``(n_rows, 1)`` — for tabular and non-sequential embedding
+      scorers, which score each validation row as its own instance. Each
+      row's "logged interaction" is exactly the one (item, reward) pair on
+      that row.
+    - **Per-user** ``(n_users, L_max)`` padded — for sequential and
+      hierarchical recommenders, whose ``score_items`` aggregates raw
+      interactions into per-user sequences and returns one score row per
+      user. Aggregation order mirrors scikit-rec's
+      ``SequentialRecommender._build_sequences`` (sort by USER_ID +
+      TIMESTAMP, then ``groupby(sort=False)``) so the per-user rows in
+      logged_items align positionally with the rows in target_proba.
+
+    Returns ``{}`` when the bundle has no validation data, or when the data
+    isn't long-format (wide_multioutput / multiclass) — the caller surfaces
+    that as a structured error.
     """
-    from skrec.constants import ITEM_ID_NAME, LABEL_NAME, USER_ID_NAME
+    from skrec.constants import ITEM_ID_NAME, LABEL_NAME, TIMESTAMP_COL, USER_ID_NAME
 
     bundle_id = (handle.datasets_used or {}).get("bundle_id")
     bundle = session.loaded_datasets.get(bundle_id) if bundle_id else None
@@ -63,18 +125,37 @@ def _build_eval_kwargs_from_validation(session, handle) -> dict[str, Any]:
     df = _read(valid_path)
     if df.empty or USER_ID_NAME not in df.columns:
         return {}
-    grouped = df.groupby(USER_ID_NAME).agg({ITEM_ID_NAME: list, LABEL_NAME: list}).reset_index()
-    if grouped.empty:
+    if ITEM_ID_NAME not in df.columns or LABEL_NAME not in df.columns:
         return {}
-    max_len = int(grouped[ITEM_ID_NAME].apply(len).max())
-    items = np.array(
-        [row + [""] * (max_len - len(row)) for row in grouped[ITEM_ID_NAME]],
-        dtype=object,
-    )
-    rewards = np.array(
-        [row + [0.0] * (max_len - len(row)) for row in grouped[LABEL_NAME]],
-        dtype=float,
-    )
+
+    if _is_sequential_recommender(handle):
+        sort_cols = [USER_ID_NAME]
+        if TIMESTAMP_COL in df.columns:
+            sort_cols.append(TIMESTAMP_COL)
+        df_sorted = df.sort_values(sort_cols)
+        grouped = (
+            df_sorted.groupby(USER_ID_NAME, sort=False)
+            .agg({ITEM_ID_NAME: list, LABEL_NAME: list})
+            .reset_index()
+        )
+        if grouped.empty:
+            return {}
+        max_len = int(grouped[ITEM_ID_NAME].apply(len).max())
+        items = np.array(
+            [
+                [str(x) for x in row] + [""] * (max_len - len(row))
+                for row in grouped[ITEM_ID_NAME]
+            ],
+            dtype=object,
+        )
+        rewards = np.array(
+            [list(row) + [0.0] * (max_len - len(row)) for row in grouped[LABEL_NAME]],
+            dtype=float,
+        )
+        return {"logged_items": items, "logged_rewards": rewards}
+
+    items = df[ITEM_ID_NAME].astype(str).to_numpy(dtype=object).reshape(-1, 1)
+    rewards = df[LABEL_NAME].astype(float).to_numpy().reshape(-1, 1)
     return {"logged_items": items, "logged_rewards": rewards}
 
 
@@ -126,6 +207,33 @@ def _evaluate_model(
     effective_eval_kwargs: dict[str, Any] = dict(eval_kwargs or {})
     if not effective_eval_kwargs and evaluator_type == "simple":
         effective_eval_kwargs = _build_eval_kwargs_from_validation(session, handle)
+        # Wide multi-output / multi-class bundles can't be auto-built here.
+        # Surface the limitation as a labelled error rather than letting the
+        # downstream evaluator KeyError on missing ITEM_ID / OUTCOME columns.
+        if not effective_eval_kwargs:
+            bundle_id = (handle.datasets_used or {}).get("bundle_id")
+            bundle = session.loaded_datasets.get(bundle_id) if bundle_id else None
+            if bundle is not None and bundle.dataset_type in (
+                "interaction_multioutput",
+                "interaction_multiclass",
+            ):
+                return err(
+                    "WideBundleEvalUnsupported",
+                    (
+                        f"evaluator_type='simple' on a {bundle.dataset_type} bundle "
+                        f"can't auto-build eval_kwargs (logged_items / logged_rewards "
+                        f"are derived from long-format ITEM_ID / OUTCOME columns, which "
+                        f"don't exist in this shape). Pass `eval_kwargs` explicitly with "
+                        f"the per-target arrays you want scored, or use a different "
+                        f"evaluator_type."
+                    ),
+                    hint=(
+                        "For wide multi-output evaluation, build logged_items / "
+                        "logged_rewards arrays from the ITEM_* columns yourself and "
+                        "pass them as eval_kwargs."
+                    ),
+                    category="wide_bundle_eval_unsupported",
+                )
 
     results = []
     first_call = True
@@ -141,9 +249,14 @@ def _evaluate_model(
                 )
                 first_call = False
             except Exception as e:
+                from scikit_rec_agent.tools.diagnose import _quick_diagnose
+
+                diagnosis = _quick_diagnose(e)
                 return err(
                     type(e).__name__,
                     f"evaluate failed for {metric_name}@{k}: {e}",
+                    hint=diagnosis.first_fix_description,
+                    category=diagnosis.category,
                 )
             key = f"{metric_name}@{k}"
             handle.metrics[key] = float(value)

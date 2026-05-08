@@ -171,6 +171,20 @@ def test_safeguards_enabled_by_default_emits_warning(session):
     assert len(warnings) == 1, "safeguards should fire on novel URLs by default"
 
 
+def test_safeguards_whitelist_system_prompt_urls(session):
+    # URLs present in the system prompt are part of the agent's own context;
+    # the model echoing one back is not a hallucination.
+    sys_prompt = "Project docs: https://docs.example.com/skrec"
+    llm = ScriptedLLM(responses=["See https://docs.example.com/skrec for details."])
+    agent = Agent(llm=llm, tools=[], system_prompt=sys_prompt, session=session)
+
+    events = list(agent.chat_turn("where are the docs?"))
+
+    assert not [e for e in events if e.type == "warning"], (
+        "URL echoed from system prompt should not trigger a hallucination warning"
+    )
+
+
 def test_safeguards_can_be_disabled(session):
     # Same scenario with enable_safeguards=False must produce zero warnings.
     llm = ScriptedLLM(responses=["Grab the data at https://made-up.example/nope.csv"])

@@ -6,8 +6,10 @@ conversation history, so the LLM cannot learn to evade them.
 
 What this catches
 -----------------
-- URLs in model output that the user did not supply this session. Shipped
-  adapters have no web retrieval, so model-introduced URLs are potential
+- URLs in model output that are not in the trusted set. The trusted set is
+  URLs the user typed or pasted this session, plus URLs present in the
+  agent's system prompt (seeded once at Agent construction). Shipped
+  adapters have no web retrieval, so URLs outside that set are potential
   fabrications (a common failure mode for "where do I download dataset X?"
   prompts).
 - References in fenced Python blocks to packages outside the trusted set

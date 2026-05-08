@@ -23,13 +23,17 @@ class DatasetBundle:
     """
 
     bundle_id: str
-    interactions: Any  # skrec.dataset.InteractionsDataset
+    interactions: Any  # skrec.dataset.InteractionsDataset (or a multi-output / multi-class subclass)
     users: Any = None
     items: Any = None
     valid_interactions: Any = None
     test_interactions: Any = None
     schema_paths: dict[str, str] = field(default_factory=dict)
     source_paths: dict[str, str] = field(default_factory=dict)
+    # "interactions" (long format), "interaction_multioutput" (wide multi-output),
+    # or "interaction_multiclass". split_data and downstream tools that need to
+    # rebuild Dataset objects from CSVs read this to pick the right Dataset class.
+    dataset_type: str = "interactions"
 
 
 @dataclass
@@ -51,13 +55,32 @@ class ModelHandle:
 
 
 @dataclass
+class FailureRecord:
+    """One failed train_model attempt — registered automatically by the
+    train_model tool's except blocks. Diagnoses key off this list to know
+    what was already tried for a given model_name."""
+
+    model_name: str
+    config: dict[str, Any]
+    bundle_args: dict[str, Any]
+    error_envelope: dict[str, Any]
+    diagnosis_category: str
+    timestamp: str
+    fix_applied: dict[str, Any] | None = None
+    retry_outcome: dict[str, Any] | None = None
+
+
+@dataclass
 class Session:
     loaded_datasets: dict[str, DatasetBundle] = field(default_factory=dict)
     trained_models: dict[str, ModelHandle] = field(default_factory=dict)
+    failure_history: list[FailureRecord] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
-    # URLs the user has typed or pasted this session. The URL-echo check in
-    # agent.chat_turn subtracts this set from URLs detected in model output
-    # so we don't warn on "you said X; here's X back."
+    # URLs the URL-echo check treats as trusted: anything the user typed or
+    # pasted this session, plus URLs present in the agent's system prompt
+    # (seeded once in Agent.__init__). The detector subtracts this set from
+    # URLs in model output so we don't warn on "you said X; here's X back"
+    # nor on the model quoting a doc link from its own instructions.
     user_supplied_urls: set[str] = field(default_factory=set)
 
 

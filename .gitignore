@@ -37,3 +37,7 @@ private/
 
 # Claude Code (per-user assistant config — not project-relevant for OSS)
 .claude/
+
+# Per-theme Session pickles for the hallucination ablation corpus builder.
+# halluc_corpus.jsonl IS checked in; the pickled in-memory state is not.
+examples/_corpus_state/

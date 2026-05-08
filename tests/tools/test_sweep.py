@@ -24,6 +24,15 @@ from scikit_rec_agent.tools.sweep import (
     _split_metric_spec,
 )
 
+try:
+    import torch  # type: ignore[import-unresolved]  # noqa: F401
+
+    _torch_available = True
+except ImportError:
+    _torch_available = False
+
+requires_torch = pytest.mark.skipif(not _torch_available, reason="PyTorch not installed")
+
 # ---------------------------------------------------------------------------
 # Capability filter — pure logic
 # ---------------------------------------------------------------------------
@@ -524,8 +533,21 @@ def test_all_embedding_families_train_on_same_bundle(binary_reward_paths, tmp_pa
     after MF in the same process is mitigated at package import in
     scikit_rec_agent/__init__.py — without that fix this test would
     SIGSEGV the whole pytest worker, not just fail.
+
+    torch is an OPTIONAL dependency of scikit-rec-agent (only pulled in via
+    ``pip install scikit-rec-agent[torch]``); the four torch-based families
+    (NCF / Two-Tower / DCN / NFM) skip when it isn't installed. MF is pure
+    numpy and is always asserted, so the test still has teeth on a
+    torch-free CI environment.
     """
     from scikit_rec_agent.tools.sweep import _build_train_args
+
+    try:
+        import torch  # noqa: F401
+
+        torch_available = True
+    except ImportError:
+        torch_available = False
 
     TOOL_CREATE_DATASETS.fn(
         bundle_id="b",
@@ -538,8 +560,16 @@ def test_all_embedding_families_train_on_same_bundle(binary_reward_paths, tmp_pa
 
     from skrec.orchestrator import create_recommender_pipeline
 
-    failures = {}
+    failures: dict[str, str] = {}
+    skipped: list[str] = []
+    trained: list[str] = []
     for method in _EMBEDDING_FAMILIES:
+        model_type = method["estimator_config"]["embedding"]["model_type"]
+        is_torch_model = model_type != "matrix_factorization"
+        if is_torch_model and not torch_available:
+            skipped.append(method["short_name"])
+            continue
+
         config = _build_train_args(method)
         try:
             recommender = create_recommender_pipeline(config)
@@ -549,10 +579,18 @@ def test_all_embedding_families_train_on_same_bundle(binary_reward_paths, tmp_pa
                 "items_ds": bundle.items,
             }
             recommender.train(**train_kwargs)
+            trained.append(method["short_name"])
         except Exception as e:
             failures[method["short_name"]] = f"{type(e).__name__}: {e}"
 
-    assert not failures, f"All five embedding families must train on the same bundle. Failures: {failures}"
+    assert not failures, (
+        "Embedding families that ran must train on the same bundle. "
+        f"Failures: {failures}. Skipped (no torch): {skipped}."
+    )
+    # MF (numpy, no torch) must always train regardless of environment.
+    assert "mf_universal" in trained, (
+        f"MF should always be trainable (it's pure numpy). trained={trained}, skipped={skipped}"
+    )
 
 
 def test_scale_tier_picks_correct_band():

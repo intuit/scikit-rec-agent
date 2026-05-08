@@ -38,3 +38,16 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Run tests
         run: pytest
+
+  test-torch:
+    name: Test torch extras (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package with torch extras
+        run: pip install -e ".[dev,torch]"
+      - name: Run all tests (torch-dependent assertions enabled)
+        run: pytest

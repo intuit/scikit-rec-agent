@@ -65,7 +65,313 @@ class Diagnosis:
 # ---------------------------------------------------------------------------
 
 
+# Registry order is significant: ``_quick_diagnose`` walks top-down and
+# returns on the first matching pattern. Multioutput-specific patterns are
+# placed BEFORE the generic sklearn ones so an upstream MultioutputScorer
+# wrapper raising through sklearn's own "y contains only 1 class" would
+# still pick up the multioutput-targeted diagnosis if a wrapper layer ever
+# re-raises with the upstream wording. The generic ``single_class_target``
+# below stays as a safety net for non-multioutput sklearn paths.
 _REGISTRY: list[FailurePattern] = [
+    # ----- scikit-rec multioutput-rework error patterns -----
+    # Patterns below match the exact phrases scikit-rec 0.3.x emits from
+    # MultioutputScorer's _validate_targets / _validate_targets_regressor
+    # and from RankingRecommender._evaluate_multioutput. Wording is lifted
+    # verbatim from the upstream source so re.search hits reliably across
+    # releases — when upstream rephrases, update here.
+    FailurePattern(
+        name="multioutput_single_class_target_in_train",
+        category="multioutput_single_class_target",
+        pattern=re.compile(
+            r"target column\(s\) with a single class in the training",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "One or more ITEM_* target columns have only one class (all 0 or all 1) "
+            "in the training slice. MultioutputScorer's default RAISE policy refuses "
+            "to fit on degenerate targets — there's no signal to learn."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Re-run transform_data with drop_degenerate_targets=True (default) "
+                    "to auto-drop these columns; their identities are surfaced in the "
+                    "transform_data result envelope under `dropped_targets`."
+                ),
+                action={"type": "advise_user", "text": "Drop the offending columns at the transform stage."},
+                auto_retryable=False,
+            ),
+            Fix(
+                description=(
+                    "Pass scorer_config={'on_degenerate_target': 'constant'} on "
+                    "train_model so the scorer falls back to a constant predictor "
+                    "for the affected targets (scikit-rec ≥ 0.3.1.dev6). The "
+                    "surviving targets are still fit normally; degenerate columns "
+                    "surface under degenerate_targets in the train_model envelope."
+                ),
+                action={
+                    "type": "advise_user",
+                    "text": "Pass scorer_config={'on_degenerate_target': 'constant'} to train_model.",
+                },
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="multioutput_all_targets_degenerate",
+        category="multioutput_all_targets_degenerate",
+        pattern=re.compile(
+            r"every target column is degenerate \(single-class\)",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "Every ITEM_* target column has only one class in the training slice. "
+            "There's nothing for the underlying classifier to fit on, and "
+            "on_degenerate_target='constant' would drop all of them and leave an empty y matrix."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Use a stratified split that retains both classes per target, or drop "
+                    "the columns and use a different evaluation strategy (e.g. predict_classes "
+                    "returns the constant per-target labels)."
+                ),
+                action={
+                    "type": "advise_user",
+                    "text": "Re-split with stratification to retain class balance per target.",
+                },
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="multioutput_non_binary_target",
+        category="multioutput_non_binary_target",
+        # Match upstream's verbatim raise at skrec/scorer/multioutput.py:410-420.
+        # The "binary numeric" leading clause is upstream-only — the agent's
+        # own pre-emptive raise in transform.py uses different wording
+        # ("wide_multioutput targets must be binary numeric — values strictly
+        # in {0, 1}"). Tightened from a 3-alternative pattern that recursively
+        # matched the agent's own envelope and surfaced a misleadingly upstream-
+        # flavoured diagnosis on a pre-fit transform rejection. Both upstream
+        # and the agent's raise share the migration-path text further down in
+        # their messages; the start-of-message anchor below disambiguates.
+        pattern=re.compile(
+            r"(?:MultioutputScorer \(classifier mode\)\s+)?requires every ITEM_<name> target to be binary numeric",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "One or more ITEM_* targets contain values outside {0, 1} (or {0.0, 1.0}). "
+            "Classifier-mode MultioutputScorer rejected these at fit time — string, "
+            "bool, signed-int, or multi-class encodings are not accepted. (If the "
+            "error came from the agent's pre-fit transform_data check instead, the "
+            "data was rejected before reaching the scorer; the fix is the same.)"
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Pre-encode at the caller before transform_data: "
+                    "df['ITEM_x'] = (df['ITEM_x'] == 'yes').astype(float). For multi-class "
+                    "targets, either (1) one-hot encode into binary columns and stay on "
+                    "MultioutputScorer, or (2) use MulticlassScorer in long format for a "
+                    "single multi-class target."
+                ),
+                action={"type": "advise_user", "text": "Pre-encode targets to binary before transform_data."},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="multioutput_retriever_unsupported",
+        category="multioutput_retriever_unsupported",
+        pattern=re.compile(
+            r"MultioutputScorer does not support a retriever",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "The recommender_params include a retriever, but MultioutputScorer's "
+            "targets are columns of ITEM_* not row-level item IDs — there's nothing "
+            "to retrieve over."
+        ],
+        fixes=[
+            Fix(
+                description="Drop the retriever from recommender_params for multioutput.",
+                action={"type": "modify_config", "set": {"recommender_params.retriever": None}},
+                auto_retryable=True,
+            ),
+            Fix(
+                description=(
+                    "If you specifically need retrieval, melt the wide targets into "
+                    "long_interactions and switch to scorer_type='universal' or "
+                    "'independent'. Use transform_data target_contract='long_interactions'."
+                ),
+                action={"type": "advise_user", "text": "Melt to long_interactions and switch scorer."},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="multioutput_item_subset_unsupported",
+        category="multioutput_item_subset_unsupported",
+        pattern=re.compile(
+            r"MultioutputScorer evaluation does not support an active item_subset",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "An item_subset is active on the scorer at evaluation time. evaluate() "
+            "iterates the full target catalogue and indexes logged_rewards against "
+            "scorer.item_names, which becomes inconsistent when the subset narrows "
+            "score_items output."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Call scorer.clear_item_subset() before evaluate(), or filter your "
+                    "logged_rewards / logged_items columns yourself to match the subset."
+                ),
+                action={"type": "advise_user", "text": "Call clear_item_subset() then re-evaluate."},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="multioutput_logged_rewards_not_binary",
+        category="non_binary_logged_rewards",
+        pattern=re.compile(
+            r"Classifier-mode MultioutputScorer evaluation requires logged_rewards|"
+            r"NonBinaryLoggedRewards",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "logged_rewards in eval_kwargs (or auto-built from the validation slice) "
+            "contains values outside {0, 1}. Classifier-mode MultioutputScorer enforces "
+            "the same binary contract at evaluation that it does at training."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Pre-encode the validation slice's ITEM_* columns to be strictly "
+                    "{0, 1} (NaN allowed for ignore-mask) before evaluate_model. If the "
+                    "auto-build path produced non-binary rewards, the source data has "
+                    "dirty floats — fix at the file level."
+                ),
+                action={"type": "advise_user", "text": "Pre-encode validation targets to binary."},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="user_id_overlap_zero",
+        category="user_id_overlap_zero",
+        pattern=re.compile(
+            r"Interactions Dataset contains Users not present in the Users Dataset|"
+            r"USER_ID values in the interactions and users frames don't overlap",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "The interactions frame and the users frame have disjoint USER_ID "
+            "values. The most common cause is a wrong `user_id_column` argument "
+            "on a previous `transform_data` call: passing a feature column name "
+            "renames the wrong column to USER_ID, and the resulting frame's "
+            "USER_IDs are feature values that don't align with the interactions' "
+            "real IDs."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Re-run transform_data target_contract='users_features' with "
+                    "user_id_column set to the actual identifier column "
+                    "(e.g. `qbo_company_id`). Compare the USER_ID samples "
+                    "in the error envelope to spot which side carries the "
+                    "wrong values."
+                ),
+                action={"type": "call_tool", "tool": "transform_data"},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="multioutput_users_dataframe_rejected",
+        category="multioutput_users_dataframe_rejected",
+        # Upstream message is verbatim: "Multioutput Scorer cannot accept Users
+        # Dataframe, set it to None!" (skrec/scorer/multioutput.py:582,601,
+        # 619,721). Note the space between "Multioutput" and "Scorer" — a
+        # previous regex required them concatenated and silently never
+        # matched. ``\s*`` accepts either form across releases.
+        pattern=re.compile(
+            r"Multioutput\s*Scorer cannot accept Users Dataframe",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "A separate users DataFrame was passed to MultioutputScorer. The wide "
+            "contract consumes user features as plain columns inside the interactions "
+            "frame alongside USER_ID + ITEM_*; a separate users dataset is rejected."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Drop the users path from create_datasets — the agent's auto-merge "
+                    "guard already merges users into the interactions frame on USER_ID "
+                    "for wide_multioutput / multiclass bundles. Re-run create_datasets."
+                ),
+                action={"type": "call_tool", "tool": "create_datasets"},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="missing_decision",
+        category="missing_decision",
+        # MissingDecision envelopes carry their own actionable hints; the
+        # registry entry exists so external callers reading category strings
+        # know it's an elicitation gate, not a runtime error. The matcher
+        # is intentionally broad — any tool that surfaces a MissingDecision
+        # error_type lands here.
+        pattern=re.compile(r"MissingDecision|missing_decision", re.IGNORECASE),
+        causes=[
+            "A tool refused to silently default an important choice (per_label, "
+            "drop_non_winners, methods='all' confirmation). The user-facing prompt "
+            "should be relayed to the user, and their answer passed back via the "
+            "named parameter."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Read the envelope's `message` for the decision being asked, "
+                    "and the `hint` for what to ask the user. Then re-call the "
+                    "tool with the user's answer in the named parameter."
+                ),
+                action={"type": "advise_user", "text": "Relay the elicitation question and re-call with the answer."},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    FailurePattern(
+        name="invalid_scorer_config_key",
+        category="invalid_scorer_config_key",
+        pattern=re.compile(
+            r"does not accept scorer_config keys",
+            re.IGNORECASE,
+        ),
+        causes=[
+            "A scorer_config key was passed that the chosen scorer_type doesn't "
+            "accept. The factory validates against the per-scorer allowlist in "
+            "skrec.orchestrator.factory._SCORER_CONFIG_ALLOWED (exposed publicly "
+            "via capability_matrix()['scorer_config_keys'])."
+        ],
+        fixes=[
+            Fix(
+                description=(
+                    "Drop the unsupported key(s). For on_degenerate_target use "
+                    "scorer_type='multioutput'. Other scorers take no scorer_config "
+                    "today — check capability_matrix()['scorer_config_keys']."
+                ),
+                action={"type": "advise_user", "text": "Drop unsupported scorer_config keys, or change scorer_type."},
+                auto_retryable=False,
+            ),
+        ],
+    ),
+    # ----- generic sklearn fallback patterns (less-specific) -----
     FailurePattern(
         name="single_class_target",
         category="single_class_target",

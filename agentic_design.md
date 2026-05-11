@@ -340,23 +340,29 @@ Tool functions receive the `Session` as a keyword arg so user-defined tools can 
 
 ---
 
-## Agent Tools (v1 — 11 tools)
+## Agent Tools (15 tools)
 
 | Tool | Purpose | Wraps |
 |---|---|---|
 | `profile_data` | Load CSV/parquet; report shape, dtypes, cardinality, sparsity, temporal range, target type | pandas + heuristics |
 | `validate_data` | Schema-compliance check against scikit-rec required schemas. Returns violations + auto-fix suggestions. | Compare against `InteractionsDataset.REQUIRED_SCHEMA_PATH_TRAINING` etc. |
-| `create_datasets` | Build `InteractionsDataset` / `UsersDataset` / `ItemsDataset` handles. Auto-generate YAML schema to tmp dir if not provided. Supports `column_mapping` to rename user columns → scikit-rec names. | `DatasetSchema.create` + dataset constructors |
+| `transform_data` | Reshape a raw file into one of nine scikit-rec contracts via composable ops (rename, pivot, melt, aggregate, dedupe, cast, parse_timestamp). Auto-detects source shape; preserves user features across wide↔long reshapes; surfaces a `dropped_targets` manifest when single-class ITEM_* columns are auto-dropped. | Internal op registry |
+| `create_datasets` | Build `InteractionsDataset` / `UsersDataset` / `ItemsDataset` handles. Auto-generate YAML schema to tmp dir if not provided. Supports `column_mapping` to rename user columns → scikit-rec names. Auto-merges user features into the interactions frame for wide multi-output / multi-class bundles and refuses bad joins via a USER_ID overlap check. | `DatasetSchema.create` + dataset constructors |
 | `split_data` | Split a bundle's interactions into train/valid/test using a recsys-appropriate strategy (temporal, leave_last_n_per_user, random_split_per_user, leave_n_users_out, random_split). Updates the bundle in place. | `skrec.split` |
-| `train_model` | Train a recommender pipeline from a `RecommenderConfig`. Creates datasets internally if called with paths; uses pre-built datasets if called with dataset handles from `create_datasets`. Uses the bundle's validation interactions (from split_data) automatically. | `create_recommender_pipeline` + `.train()` |
-| `evaluate_model` | Run evaluation: evaluator type + metrics + multiple k values. Supports all 7 evaluator types. | `BaseRecommender.evaluate()` |
+| `list_compatible_options` | Drives the hierarchical model-design flow: recommender_type → scorer_type → estimator_type → model_type → hyperparameters, one step at a time. Each option carries a `what_it_is / when_to_pick / tradeoff_vs_alternatives` triple. Terminal step returns an `assembled_config` for `train_model`. | Live capability-matrix introspection |
+| `train_model` | Train a recommender pipeline from a `RecommenderConfig`. Accepts a `scorer_config` block (e.g. `{'on_degenerate_target': 'constant'}`) for scorer-level knobs. Creates datasets internally if called with paths; uses pre-built datasets if called with dataset handles. Auto-picks a curated default config when none is supplied. | `create_recommender_pipeline` + `.train()` |
+| `sweep_methods` | Train + evaluate multiple methods on the same bundle and return a ranked leaderboard. Modes: `list` / `auto` / `all` (requires `confirmed_all=True`) / `broad` / explicit method dicts or short_names. `MissingDecision` on >100K-row bundles without explicit `drop_non_winners`. | Iterates `train_model` + `evaluate_model` |
+| `diagnose_training_failure` | Pattern-match a failed `train_model` envelope against the 26-pattern registry and return ranked candidate fixes. Multioutput-specific patterns walk before generic sklearn fallbacks. Auto-retries the top safe fix; bounded by `max_retries`. | Internal `_REGISTRY` walk |
+| `evaluate_model` | Run evaluation: evaluator type + metrics + multiple k values. Supports all 7 evaluator types × 9 metrics. Auto-builds `eval_kwargs` from validation interactions (including the wide multi-output `(n_users, n_targets)` shape). `per_label=True` returns Dict[label, value] for MultioutputScorer (all metrics) or long-format UniversalScorer (roc_auc / pr_auc). | `BaseRecommender.evaluate()` |
 | `compare_models` | Tabulate metrics across trained models. Markdown table sorted by primary metric. | Session state lookup |
 | `run_hpo` | Optuna-based hyperparameter optimization. Requires a bundle with validation interactions (use `split_data` first). Returns best config + trial results, optionally retrains the best config and registers it. | `HyperparameterOptimizer.run_optimization()` |
 | `save_model` | Persist model + config + metrics to local registry | pickle + JSON metadata |
 | `list_models` | List models in the local registry (not just session) with metadata. | Filesystem scan of `~/.scikit-rec/registry/` |
 | `load_model` | Load a registered model into the current session. | pickle + session state mutation |
 
-**`suggest_pipelines` is deliberately NOT a tool.** It's the agent's job: after `profile_data` + `validate_data`, the LLM emits 2–5 candidate `RecommenderConfig` dicts as text in its reply with rationale for each. The user picks one (or more), then the LLM calls `train_model`. The factory validates the config on entry — there's no need for a Python-side validator.
+**`suggest_pipelines` is deliberately NOT a tool.** Model selection happens either through the design flow (`list_compatible_options` walks the user through each axis) or through the sweep flow (`sweep_methods` runs the menu + leaderboard). The factory validates configs on entry — there's no need for a separate Python-side validator.
+
+The v1 spec below documents the schemas for the original 11 tools. The four added since (`transform_data`, `list_compatible_options`, `sweep_methods`, `diagnose_training_failure`) follow the same input/output envelope contract; see their `Tool` dataclass declarations in [`scikit_rec_agent/tools/`](./scikit_rec_agent/tools/) for the live JSON schemas.
 
 ### Tool error contract
 

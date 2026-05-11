@@ -163,6 +163,354 @@ def test_auto_sweep_wide_multioutput_uses_multioutput_scorer():
     assert any(m["scorer_type"] == "multioutput" for m in methods)
 
 
+def test_auto_sweep_wide_multioutput_has_classifier_and_regressor_entries():
+    """both classifier and regression entries must exist so a wide
+    bundle with continuous ITEM_* values can reach MultiOutputRegressor
+    via methods='all'. _filter_by_profile picks one based on profiled
+    target_type.
+    """
+    methods = _AUTO_SWEEPS["wide_multioutput"]
+    short_names = {m["short_name"] for m in methods}
+    assert "xgb_multioutput" in short_names
+    assert "xgb_multioutput_regression" in short_names
+
+
+def test_filter_by_profile_binary_wide_keeps_classifier_drops_regression():
+    """when ITEM_* are binary, the classifier entry survives and the
+    regression entry is filtered out with a clear reason. Inverse case
+    pinned in the regression-targets test below.
+    """
+    profile = {"n_rows": 1000, "n_users": 100, "target_type": "binary"}
+    keep_clf, _ = _filter_by_profile({"short_name": "xgb_multioutput"}, profile)
+    keep_reg, reason = _filter_by_profile({"short_name": "xgb_multioutput_regression"}, profile)
+    assert keep_clf is True
+    assert keep_reg is False
+    assert "binary" in (reason or "").lower()
+
+
+def test_filter_by_profile_continuous_wide_keeps_regression_drops_classifier():
+    profile = {"n_rows": 1000, "n_users": 100, "target_type": "continuous"}
+    keep_clf, reason = _filter_by_profile({"short_name": "xgb_multioutput"}, profile)
+    keep_reg, _ = _filter_by_profile({"short_name": "xgb_multioutput_regression"}, profile)
+    assert keep_clf is False
+    assert "continuous" in (reason or "").lower()
+    assert keep_reg is True
+
+
+def test_sweep_methods_per_label_missing_decision_on_multi_target_wide(tmp_path, session):
+    """sweep_methods on a multi-target wide_multioutput bundle without
+    explicit per_label returns MissingDecision so the sweep doesn't bypass
+    the evaluate_model gate. Without this mirror, a 13-target QBO sweep
+    would silently produce macro-only metrics while individual
+    evaluate_model calls would have asked.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    df = pd.DataFrame(
+        {
+            "USER_ID": [f"u{i}" for i in range(10)],
+            "ITEM_a": [i % 2 for i in range(10)],
+            "ITEM_b": [(i + 1) % 2 for i in range(10)],
+            "ITEM_c": [(i + 2) % 2 for i in range(10)],
+        }
+    )
+    p = tmp_path / "wide.csv"
+    df.to_csv(p, index=False)
+    TOOL_CREATE_DATASETS.fn(bundle_id="g1w", interactions_path=str(p), session=session)
+
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="g1w",
+        metrics=["roc_auc"],
+        primary_metric="roc_auc",
+        methods=["xgb_multioutput"],
+        session=session,
+        drop_non_winners=False,  # explicit, so that gate doesn't fire
+        # per_label deliberately omitted → defaults to None → must MissingDecision
+    )
+    assert result["status"] == "error"
+    assert result["error_type"] == "MissingDecision"
+    assert result["category"] == "missing_decision"
+    assert "per_label" in result["message"]
+
+
+def test_sweep_methods_per_label_missing_decision_on_long_format_classification(binary_reward_paths, session):
+    """sweep_methods gate now mirrors evaluate_model — fires on
+    long-format interactions bundles paired with a classification metric
+    too, not just on wide_multioutput. Pin the symmetry with the system
+    prompt MUST-ASK rule §2 which lists both cases.
+    """
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    TOOL_CREATE_DATASETS.fn(
+        bundle_id="long_clf",
+        interactions_path=binary_reward_paths["interactions"],
+        users_path=binary_reward_paths["users"],
+        items_path=binary_reward_paths["items"],
+        session=session,
+    )
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="long_clf",
+        metrics=["roc_auc"],
+        primary_metric="roc_auc",
+        methods=["xgb_universal"],
+        session=session,
+        drop_non_winners=False,
+        # per_label deliberately omitted on a long bundle + roc_auc → MissingDecision
+    )
+    assert result["status"] == "error"
+    assert result["error_type"] == "MissingDecision"
+    assert result["category"] == "missing_decision"
+    assert "per_label" in result["message"]
+    assert "Long-format" in result["message"] or "long" in result["message"].lower()
+
+
+def test_sweep_methods_per_label_default_safe_on_long_bundle(binary_reward_paths, session):
+    """long-format universal bundle should NOT trigger the
+    per_label gate. The gate is data-conditional (multi-target multioutput
+    only), not blanket. Without the carve-out, every sweep call would
+    require explicit per_label which is annoying for the common ranking
+    case.
+    """
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    TOOL_CREATE_DATASETS.fn(
+        bundle_id="g1l",
+        interactions_path=binary_reward_paths["interactions"],
+        users_path=binary_reward_paths["users"],
+        items_path=binary_reward_paths["items"],
+        session=session,
+    )
+    TOOL_SPLIT_DATA.fn(
+        bundle_id="g1l",
+        strategy="random_split",
+        valid_fraction=0.2,
+        session=session,
+        random_state=1,
+    )
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="g1l",
+        metrics=["NDCG_at_k"],
+        primary_metric="NDCG_at_k",
+        methods=["xgb_universal"],
+        session=session,
+        drop_non_winners=False,
+        # per_label omitted → None → falls through to False, no MissingDecision
+    )
+    assert result["status"] == "ok", result
+
+
+def test_sweep_methods_drop_non_winners_missing_decision_on_large_bundle(tmp_path, session):
+    """a bundle with >100K rows must have drop_non_winners
+    set explicitly. Default None triggers MissingDecision so the agent
+    asks the user rather than silently consuming laptop RAM with retained
+    recommenders. Build a 100,001-row bundle and verify the gate fires.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    n = 100_001
+    df = pd.DataFrame(
+        {
+            "USER_ID": [f"u{i % 1000}" for i in range(n)],
+            "ITEM_ID": [f"i{i % 500}" for i in range(n)],
+            "OUTCOME": [float(i % 2) for i in range(n)],
+        }
+    )
+    p = tmp_path / "big.csv"
+    df.to_csv(p, index=False)
+    TOOL_CREATE_DATASETS.fn(bundle_id="big", interactions_path=str(p), session=session)
+
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="big",
+        metrics=["NDCG_at_k"],
+        primary_metric="NDCG_at_k",
+        methods=["xgb_universal"],
+        session=session,
+        # drop_non_winners deliberately omitted → defaults to None → must MissingDecision
+    )
+    assert result["status"] == "error"
+    assert result["error_type"] == "MissingDecision"
+    assert result["category"] == "missing_decision"
+    assert "drop_non_winners" in result["message"]
+
+
+def test_sweep_methods_list_does_not_trigger_drop_non_winners_gate(tmp_path, session):
+    """methods='list' returns the menu without training anything, so
+    drop_non_winners is irrelevant. Without this skip, calling
+    sweep_methods(methods='list') on a >100K-row bundle would block on a
+    question the user can't answer until they've SEEN the menu (chicken-
+    and-egg). Pin the carve-out.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    n = 100_001
+    df = pd.DataFrame(
+        {
+            "USER_ID": [f"u{i % 1000}" for i in range(n)],
+            "ITEM_ID": [f"i{i % 500}" for i in range(n)],
+            "OUTCOME": [float(i % 2) for i in range(n)],
+        }
+    )
+    p = tmp_path / "big.csv"
+    df.to_csv(p, index=False)
+    TOOL_CREATE_DATASETS.fn(bundle_id="bigl", interactions_path=str(p), session=session)
+
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="bigl",
+        metrics=["NDCG_at_k"],
+        primary_metric="NDCG_at_k",
+        methods="list",  # menu mode — gate must NOT fire
+        session=session,
+    )
+    assert result["status"] == "ok", result
+    assert "available_methods" in result["data"]
+
+
+def test_sweep_methods_drop_non_winners_default_safe_on_small_bundle(binary_reward_paths, session):
+    """the guardrail must NOT fire on small bundles. The default-None
+    behavior is "ask explicitly only when memory pressure is real" —
+    blocking every call would be obnoxious. Verify the small fixture
+    proceeds without an explicit drop_non_winners.
+    """
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.splitting import TOOL_SPLIT_DATA
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    TOOL_CREATE_DATASETS.fn(
+        bundle_id="small",
+        interactions_path=binary_reward_paths["interactions"],
+        users_path=binary_reward_paths["users"],
+        items_path=binary_reward_paths["items"],
+        session=session,
+    )
+    TOOL_SPLIT_DATA.fn(
+        bundle_id="small",
+        strategy="random_split",
+        valid_fraction=0.2,
+        session=session,
+        random_state=1,
+    )
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="small",
+        metrics=["NDCG_at_k"],
+        primary_metric="NDCG_at_k",
+        methods=["xgb_universal"],
+        session=session,
+    )
+    assert result["status"] == "ok", result
+
+
+def test_sweep_methods_all_requires_confirmed_all_flag(binary_reward_paths, session):
+    """methods='all' without confirmed_all=True returns
+    MissingDecision so the agent runs through the list → ask → re-call
+    flow instead of silently dispatching every method.
+    """
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    TOOL_CREATE_DATASETS.fn(
+        bundle_id="b",
+        interactions_path=binary_reward_paths["interactions"],
+        session=session,
+    )
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="b",
+        metrics=["NDCG_at_k"],
+        primary_metric="NDCG_at_k",
+        methods="all",  # without confirmed_all
+        session=session,
+        drop_non_winners=False,
+    )
+    assert result["status"] == "error"
+    assert result["error_type"] == "MissingDecision"
+    assert "confirmed_all" in result["message"]
+
+
+def test_sweep_methods_list_emits_reshape_recommendation_for_wide_multioutput(tmp_path, session):
+    """methods='list' on a wide_multioutput bundle surfaces
+    a reshape_recommendation field so the agent asks the user whether to
+    stay on the narrow wide menu or melt to long_interactions for a
+    broader comparison.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+    from scikit_rec_agent.tools.sweep import TOOL_SWEEP_METHODS
+
+    df = pd.DataFrame(
+        {
+            "USER_ID": [f"u{i}" for i in range(10)],
+            "ITEM_a": [i % 2 for i in range(10)],
+            "ITEM_b": [(i + 1) % 2 for i in range(10)],
+        }
+    )
+    p = tmp_path / "wide.csv"
+    df.to_csv(p, index=False)
+    TOOL_CREATE_DATASETS.fn(bundle_id="w", interactions_path=str(p), session=session)
+
+    result = TOOL_SWEEP_METHODS.fn(
+        bundle_id="w",
+        metrics=["roc_auc"],
+        primary_metric="roc_auc",
+        methods="list",
+        session=session,
+    )
+    assert result["status"] == "ok"
+    assert result["data"]["contract"] == "wide_multioutput"
+    rec = result["data"].get("reshape_recommendation")
+    assert rec is not None
+    assert "long_interactions" in rec or "long_with_timestamp" in rec
+
+
+def test_profile_bundle_wide_multioutput_classifies_item_dtype(tmp_path, session):
+    """_profile_bundle inspects ITEM_* dtype/uniques for wide bundles
+    (where OUTCOME is absent). Binary ITEM_* → target_type='binary';
+    continuous ITEM_* → target_type='continuous'. Without this, the
+    classifier-vs-regressor filter above would never fire for wide bundles
+    even when both entries are listed in _AUTO_SWEEPS.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import TOOL_CREATE_DATASETS
+
+    df_binary = pd.DataFrame(
+        {
+            "USER_ID": [f"u{i}" for i in range(20)],
+            "ITEM_a": [i % 2 for i in range(20)],
+            "ITEM_b": [(i + 1) % 2 for i in range(20)],
+        }
+    )
+    p_bin = tmp_path / "wide_bin.csv"
+    df_binary.to_csv(p_bin, index=False)
+    TOOL_CREATE_DATASETS.fn(bundle_id="bw_bin", interactions_path=str(p_bin), session=session)
+    profile = _profile_bundle(session.loaded_datasets["bw_bin"])
+    assert profile["target_type"] == "binary"
+
+    df_cont = pd.DataFrame(
+        {
+            "USER_ID": [f"u{i}" for i in range(20)],
+            "ITEM_a": [float(i) * 1.7 for i in range(20)],
+            "ITEM_b": [float(i) * 0.3 + 5 for i in range(20)],
+        }
+    )
+    p_cont = tmp_path / "wide_cont.csv"
+    df_cont.to_csv(p_cont, index=False)
+    TOOL_CREATE_DATASETS.fn(bundle_id="bw_cont", interactions_path=str(p_cont), session=session)
+    profile = _profile_bundle(session.loaded_datasets["bw_cont"])
+    assert profile["target_type"] == "continuous"
+
+
 def test_broad_sweep_long_interactions_excludes_sequential():
     methods = _broad_sweep_for_contract("long_interactions")
     scorers = {m["scorer_type"] for m in methods}

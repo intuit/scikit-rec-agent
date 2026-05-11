@@ -117,6 +117,36 @@ RECOMMENDER_EXPLANATIONS: dict[str, dict[str, str]] = {
 # scorer_type
 # ---------------------------------------------------------------------------
 
+# Cross-cutting convertibility note shared across the long-format scorers
+# (universal / independent) and called out from multioutput too. Pulled out
+# so the wording stays consistent — drift between scorer descriptions is a
+# real source of confusion when the agent walks `list_compatible_options`.
+_LONG_FROM_WIDE_CONVERTIBILITY = (
+    "Convertibility note — wide ↔ long: this scorer consumes the long-format "
+    "(USER_ID, ITEM_ID, OUTCOME) contract. If your source is wide multi-output "
+    "(one row per user, multiple ITEM_* binary columns), call transform_data "
+    "with target_contract='long_interactions' first; non-target columns ride "
+    "along as features through the melt, so user features are preserved. The "
+    "reverse direction (long → wide for multioutput) is also supported via "
+    "target_contract='wide_multioutput', but the pivot fills missing "
+    "(user, item) pairs with zeros — only safe when every user has every "
+    "label observed (or when implicit zero is a valid 'didn't take it' "
+    "signal, which is the typical multi-label classification setup)."
+)
+
+_WIDE_FROM_LONG_CONVERTIBILITY = (
+    "Convertibility note — wide ↔ long: multioutput consumes the wide format "
+    "(one row per user, multiple ITEM_* targets). If your source is long "
+    "(USER_ID, ITEM_ID, OUTCOME), call transform_data with "
+    "target_contract='wide_multioutput' to pivot — but this is only safe "
+    "when every label is observed for every user (or when implicit zeros "
+    "are meaningful 'didn't take it' values, which is the typical "
+    "multi-label classification setup). The reverse direction (wide → long) "
+    "is the easy one and feature-preserving; use it when you want to compare "
+    "multioutput against universal / independent on the same data."
+)
+
+
 SCORER_EXPLANATIONS: dict[str, dict[str, str]] = {
     "universal": {
         "what_it_is": (
@@ -129,7 +159,7 @@ SCORER_EXPLANATIONS: dict[str, dict[str, str]] = {
         ),
         "tradeoff_vs_alternatives": (
             "Trains one big model on all data — less interpretable than independent per-item models, "
-            "but typically beats them on raw accuracy."
+            "but typically beats them on raw accuracy. " + _LONG_FROM_WIDE_CONVERTIBILITY
         ),
     },
     "independent": {
@@ -140,7 +170,7 @@ SCORER_EXPLANATIONS: dict[str, dict[str, str]] = {
         ),
         "tradeoff_vs_alternatives": (
             "Doesn't share user × item structure across items; tabular estimators only "
-            "(rejects embedding estimators per scikit-rec's factory rules)."
+            "(rejects embedding estimators per scikit-rec's factory rules). " + _LONG_FROM_WIDE_CONVERTIBILITY
         ),
     },
     "multiclass": {
@@ -155,14 +185,31 @@ SCORER_EXPLANATIONS: dict[str, dict[str, str]] = {
     },
     "multioutput": {
         "what_it_is": (
-            "Single model that emits one score per target — vector-valued output where each output head is one ITEM_*."
+            "Single model that emits one score per target — vector-valued output where each output head is one ITEM_*. "
+            "Two modes: classifier (binary ITEM_* targets — values strictly in {0, 1}) and regressor (continuous "
+            "ITEM_* targets, e.g. dollar amounts or counts). Mode is picked by ``estimator_config.ml_task`` "
+            "('classification' or 'regression') and the matching xgb estimator is wired in. The auto-sweep "
+            "lists both — the contract+profile picks the right one based on the ITEM_* dtypes / uniques. "
+            "When you call ``recommender.evaluate(per_label=True)`` it returns Dict[str, float] keyed by "
+            "ITEM_* name (one entry per fit-time target, NaN for any target the metric is undefined on)."
         ),
         "when_to_pick": (
-            "Wide multi-output / multi-label data: one row per user with several binary action "
-            "columns (label_X / ITEM_X) you want to predict jointly."
+            "Wide multi-output / multi-label data: one row per user with several action columns "
+            "(label_X / ITEM_X) you want to predict jointly. Use classifier mode for binary actions, "
+            "regressor mode for continuous quantities. Don't pair ranking metrics with per_label — "
+            "ranking aggregates across all targets per user, not per target."
         ),
         "tradeoff_vs_alternatives": (
-            "Tabular estimators only (rejects embedding estimators); requires ≥2 ITEM_* target columns."
+            "Tabular estimators only (rejects embedding estimators); requires ≥2 ITEM_* target columns. "
+            "User features are supported but must live as additional columns inside the interactions "
+            "DataFrame alongside USER_ID + ITEM_*; a separate users_path is not consumed (create_datasets "
+            "auto-merges on USER_ID for you). Item-level features have no place in the wide layout — "
+            "items are encoded as columns, not rows — so melt to long_interactions if you need them. "
+            "Retriever is rejected (there's no row-level ITEM_ID to retrieve over). Evaluation rejects "
+            "an active item_subset (catalogue narrowing on a per-target scorer is ill-defined). "
+            "Single-class targets in the train slice raise under the default RAISE policy — pass "
+            "``scorer_config={'on_degenerate_target': 'constant'}`` to fall back to a constant "
+            "predictor, or let transform_data auto-drop them. " + _WIDE_FROM_LONG_CONVERTIBILITY
         ),
     },
     "sequential": {
@@ -256,13 +303,20 @@ TABULAR_MODEL_EXPLANATIONS: dict[str, dict[str, str]] = {
 
 EMBEDDING_MODEL_EXPLANATIONS: dict[str, dict[str, str]] = {
     "matrix_factorization": {
-        "what_it_is": ("Classic matrix factorisation via ALS or SGD. Pure numpy implementation — no torch dependency."),
+        "what_it_is": (
+            "Classic matrix factorisation via ALS (closed-form alternating ridge solves) or "
+            "per-sample SGD. Pure numpy implementation — no torch dependency."
+        ),
         "when_to_pick": (
             "Sparse implicit-feedback baseline. Robust on >95% sparsity with ≥1K interactions. "
             "Fastest of the embedding family to train."
         ),
         "tradeoff_vs_alternatives": (
-            "Doesn't use side features (only USER_ID × ITEM_ID); other embedding methods exploit features."
+            "Doesn't use side features (only USER_ID × ITEM_ID); other embedding methods exploit features. "
+            "Does NOT take a `batch_size` parameter — ALS has no notion of mini-batches by "
+            "construction (each step solves a per-user / per-item ridge in closed form over all "
+            "observed entries), and the SGD variant is per-sample. Don't pattern-match a "
+            "`batch_size` onto it from neural-net configs."
         ),
     },
     "ncf": {

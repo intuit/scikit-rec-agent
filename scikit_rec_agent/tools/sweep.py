@@ -196,12 +196,25 @@ _AUTO_SWEEPS: dict[str, list[dict[str, Any]]] = {
         },
     ],
     "wide_multioutput": [
+        # The classifier entry handles binary ITEM_* targets (the common case
+        # we ship for); the regression entry handles continuous ITEM_*
+        # targets. ``_filter_by_profile`` picks one based on the profiled
+        # target_type derived from the ITEM_* columns. Listing both makes the
+        # sweep self-selecting — callers pass methods='all' without having
+        # to know which mode their data needs.
         {
             "short_name": "xgb_multioutput",
             "recommender_type": "ranking",
             "scorer_type": "multioutput",
             "estimator_type": "tabular",
             "estimator_config": _TABULAR_XGB,
+        },
+        {
+            "short_name": "xgb_multioutput_regression",
+            "recommender_type": "ranking",
+            "scorer_type": "multioutput",
+            "estimator_type": "tabular",
+            "estimator_config": _TABULAR_REGRESSION,
         },
     ],
     "multiclass": [
@@ -281,10 +294,13 @@ def _profile_bundle(bundle) -> dict[str, Any]:
     - keeping it stateless avoids cache-invalidation bugs when split_data
       mutates source_paths in place.
     """
-    df = _read(bundle.source_paths.get("interactions"))
+    from scikit_rec_agent.tools.datasets import _resolve_interactions_path
+
+    df = _read(_resolve_interactions_path(bundle.source_paths))
     if df.empty:
         return {
             "n_rows": 0,
+            "n_users": 0,
             "sparsity": None,
             "target_type": None,
             "has_timestamps": False,
@@ -295,11 +311,14 @@ def _profile_bundle(bundle) -> dict[str, Any]:
     n_rows = int(len(df))
 
     sparsity: float | None = None
+    n_users = 0
     if "USER_ID" in df.columns and "ITEM_ID" in df.columns:
         n_users = int(df["USER_ID"].nunique())
         n_items = int(df["ITEM_ID"].nunique())
         if n_users > 0 and n_items > 0:
             sparsity = 1.0 - (n_rows / (n_users * n_items))
+    elif "USER_ID" in df.columns:
+        n_users = int(df["USER_ID"].nunique())
 
     target_type: str | None = None
     if "OUTCOME" in df.columns:
@@ -311,6 +330,35 @@ def _profile_bundle(bundle) -> dict[str, Any]:
             target_type = "binary"
         else:
             target_type = "continuous"
+    else:
+        # Wide_multioutput / multiclass shape: no OUTCOME, targets are the
+        # ITEM_* columns. Sample their unique values to classify across all
+        # targets — if every target is binary, the auto-sweep stays on the
+        # classifier branch; if any target is continuous, switch to the
+        # regression branch via the resize step. Single-class targets
+        # surface as 'constant' too (transform_data's auto-drop should
+        # have removed them, but it's defensive to flag them here as well).
+        item_cols = [c for c in df.columns if c.startswith("ITEM_") and c != "ITEM_ID"]
+        if item_cols:
+            seen: set[float] = set()
+            any_non_numeric = False
+            for c in item_cols:
+                if not pd.api.types.is_numeric_dtype(df[c]):
+                    any_non_numeric = True
+                    break
+                seen.update(float(v) for v in df[c].dropna().unique())
+            if any_non_numeric:
+                # Non-numeric ITEM_* columns shouldn't reach the profiler in
+                # practice (transform_data rejects them upfront), but if
+                # they do, the safest tag is None — let the upstream
+                # classifier-vs-regressor path handle it.
+                target_type = None
+            elif len(seen) <= 1:
+                target_type = "constant"
+            elif seen.issubset({0.0, 1.0}):
+                target_type = "binary"
+            else:
+                target_type = "continuous"
 
     has_timestamps = "TIMESTAMP" in df.columns
 
@@ -332,6 +380,7 @@ def _profile_bundle(bundle) -> dict[str, Any]:
 
     return {
         "n_rows": n_rows,
+        "n_users": n_users,
         "sparsity": sparsity,
         "target_type": target_type,
         "has_timestamps": has_timestamps,
@@ -415,6 +464,26 @@ def _filter_by_profile(method: dict[str, Any], profile: dict[str, Any]) -> tuple
     n_rows = profile.get("n_rows", 0) or 0
     target_type = profile.get("target_type")
 
+    # Wide_multioutput classifier vs regression auto-pick. The auto-sweep
+    # lists both entries; the profile's target_type (derived from ITEM_*
+    # uniques) decides which to keep. binary → classifier; continuous →
+    # regression; constant → drop both (transform_data should have caught
+    # it but defensive); None → keep both (let upstream surface the issue).
+    if "multioutput" in short:
+        is_regression_entry = "regression" in short
+        if target_type == "binary" and is_regression_entry:
+            return False, (
+                f"{short} dropped: data has binary ITEM_* targets, the "
+                "classifier-mode multioutput entry is the right pick."
+            )
+        if target_type == "continuous" and not is_regression_entry:
+            return False, (
+                f"{short} dropped: data has continuous ITEM_* targets, the "
+                "regression-mode multioutput entry is the right pick."
+            )
+        if target_type == "constant":
+            return False, f"{short} dropped: every ITEM_* target is single-class."
+
     if target_type == "continuous":
         # XGBoost: resize swaps ml_task='classification' → 'regression' below.
         # SASRec/HRNN: resize swaps `*_classifier` model_type → `*_regressor`.
@@ -442,6 +511,30 @@ def _filter_by_profile(method: dict[str, Any], profile: dict[str, Any]) -> tuple
             return False, f"MF needs sparsity ≥ 0.90 (CF regime); got {sparsity}"
         if n_rows < 1_000:
             return False, f"MF needs n_rows ≥ 1000 to factorize stably; got {n_rows}"
+        # Upper bound: scikit-rec's MatrixFactorizationEstimator runs ALS
+        # in a pure-numpy Python loop, doing one (n_factors × n_factors)
+        # ridge solve per user per iteration. At ~500K users / 5M rows
+        # the loop wedges the laptop without producing a single log line
+        # (observed at ~1M users / 13.7M rows for ~9 hours, no progress).
+        # See skrec/estimator/embedding/matrix_factorization_estimator.py
+        # :130-159. Until the upstream ships a vectorized ALS, drop MF
+        # at this scale and surface the reason in the leaderboard so
+        # callers know it isn't a silent omission.
+        n_users = profile.get("n_users") or 0
+        if n_rows > 5_000_000 or n_users > 500_000:
+            return False, (
+                f"MF dropped at this scale: scikit-rec's ALS implementation "
+                f"runs pure-numpy per-user ridge solves in a Python loop and "
+                f"wedges on n_users>500K or n_rows>5M (observed: n_users="
+                f"{n_users}, n_rows={n_rows}). Vectorized ALS isn't upstream "
+                f"yet; until then MF is out at this scale. Other CF baselines "
+                f"(NCF / DCN / NFM / Two-Tower) handle large data via "
+                f"mini-batch SGD and stay in the sweep. To override (e.g. "
+                f"overnight run or after upstream ships vectorized ALS), "
+                f"call `train_model` directly with the mf_universal config "
+                f"instead of going through `sweep_methods` — the gate only "
+                f"fires for the auto-sweep path."
+            )
         return True, None
 
     if any(family in short for family in ("ncf", "two_tower", "dcn", "nfm")):
@@ -584,7 +677,9 @@ def contract_from_dataframe(df: pd.DataFrame) -> str:
 
 
 def _detect_bundle_contract(bundle) -> str:
-    return contract_from_dataframe(_read(bundle.source_paths.get("interactions")))
+    from scikit_rec_agent.tools.datasets import _resolve_interactions_path
+
+    return contract_from_dataframe(_read(_resolve_interactions_path(bundle.source_paths)))
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +844,7 @@ def _train_and_evaluate(
     eval_top_k: int,
     evaluator_type: str,
     session,
+    per_label: bool = False,
 ) -> dict[str, Any]:
     """Train + evaluate one method. Returns a row dict for the leaderboard.
 
@@ -794,6 +890,7 @@ def _train_and_evaluate(
         metrics=metric_names,
         k_values=k_values,
         session=session,
+        per_label=per_label,
     )
     if eval_result["status"] != "ok":
         return {
@@ -805,11 +902,23 @@ def _train_and_evaluate(
         }
 
     metric_map = {f"{name}@{k}": handle.metrics.get(f"{name}@{k}") for name, k in metric_pairs}
-    return {
+    # When per_label fired, surface the raw per-target dicts on each leaderboard
+    # row too so the agent can render per-label tables without re-querying
+    # handle.metrics. The macro-averaged scalar still appears under
+    # metric_map for sort / ranking purposes.
+    per_label_map: dict[str, dict[str, float]] = {}
+    if per_label:
+        for entry in eval_result["data"].get("results", []):
+            if "per_label" in entry:
+                per_label_map[f"{entry['metric']}@{entry['k']}"] = entry["per_label"]
+    payload: dict[str, Any] = {
         "status": "ok",
         "metrics": metric_map,
         "model_id": trained_model_id,
     }
+    if per_label_map:
+        payload["per_label"] = per_label_map
+    return payload
 
 
 def _evaluate_existing(
@@ -897,13 +1006,136 @@ def _sweep_methods(
     skip_existing: bool = True,
     auto_save_top_k: int = 0,
     name_prefix: str = "sweep",
-    drop_non_winners: bool = False,
+    drop_non_winners: bool | None = None,
+    per_label: bool | None = None,
+    confirmed_all: bool = False,
 ) -> dict[str, Any]:
     bundle = session.loaded_datasets.get(bundle_id)
     if bundle is None:
         return err("BundleNotFound", f"No bundle '{bundle_id}' in session.")
 
     contract = _detect_bundle_contract(bundle)
+
+    # Programmatic MUST-ASK guardrail: drop_non_winners must be explicit on
+    # large bundles. Default None means "agent did not pass a value" — on
+    # bundles with >100K rows, a sweep that retains every trained
+    # recommender easily holds 1–3 GB of user embeddings (MF + NCF +
+    # Two-Tower together). Refuse upfront so the agent asks the user
+    # rather than silently consuming laptop RAM. Pass True or False
+    # explicitly to override.
+    #
+    # Skipped when methods="list" — that mode returns the menu without
+    # training, so drop_non_winners is irrelevant. Without this skip, the
+    # menu path itself would block on a question the user can't answer
+    # until they've SEEN the menu (chicken-and-egg).
+    is_list_mode = isinstance(methods, str) and methods == "list"
+    if drop_non_winners is None and not is_list_mode:
+        profile_quick = _profile_bundle(bundle)
+        n_rows = profile_quick.get("n_rows") or 0
+        if n_rows > 100_000:
+            return err(
+                "MissingDecision",
+                (
+                    f"Bundle has {n_rows:,} rows. A sweep that retains every trained "
+                    "recommender can hold 1–3 GB of user embeddings (MF + NCF + "
+                    "Two-Tower together). Pass `drop_non_winners=True` to release "
+                    "non-winning recommenders after evaluation, or "
+                    "`drop_non_winners=False` to keep them all. The decision must be "
+                    "explicit on bundles >100K rows to avoid silent memory pressure."
+                ),
+                hint=(
+                    "Ask the user: 'Drop non-winners after evaluation to save RAM? "
+                    "(true / false)'. Pass their answer as drop_non_winners=..."
+                ),
+                category="missing_decision",
+            )
+        drop_non_winners = False
+    if drop_non_winners is None:
+        drop_non_winners = False
+
+    # Programmatic MUST-ASK guardrail: per_label must be explicit on
+    # multi-target multioutput bundles. Mirror the evaluate_model gate so
+    # the sweep path doesn't bypass it — without this, a sweep on a
+    # 13-target QBO bundle would silently produce macro-only metrics
+    # while individual evaluate_model calls would have asked.
+    # Skipped for methods="list" (no training happens). Two trigger
+    # conditions, matching the evaluate_model gate (and the system prompt
+    # MUST-ASK rule §2):
+    #   (a) wide_multioutput bundle with ≥2 ITEM_* targets
+    #   (b) long-format interactions bundle paired with a classification
+    #       metric (roc_auc / pr_auc)
+    _CLASSIFICATION_METRIC_NAMES = {"roc_auc", "pr_auc"}
+    if per_label is None and not is_list_mode:
+        classification_requested = any(m in _CLASSIFICATION_METRIC_NAMES for m in metrics)
+        if bundle.dataset_type == "interaction_multioutput":
+            from scikit_rec_agent.tools.datasets import _resolve_interactions_path
+
+            inter_path = _resolve_interactions_path(bundle.source_paths)
+            n_targets = 0
+            if inter_path:
+                df_for_gate = _read(inter_path)
+                n_targets = sum(1 for c in df_for_gate.columns if c.startswith("ITEM_") and c != "ITEM_ID")
+            if n_targets >= 2:
+                return err(
+                    "MissingDecision",
+                    (
+                        f"Bundle has {n_targets} ITEM_* targets. The MUST-ASK policy "
+                        "requires per_label to be explicit on multi-target multioutput "
+                        "sweeps — defaulting silently to macro-averaged hides exactly the "
+                        "per-target detail users typically want. Pass per_label=True to "
+                        "produce Dict[str, float] per metric (one entry per ITEM_*), or "
+                        "per_label=False for a single macro-averaged scalar per method."
+                    ),
+                    hint=(
+                        "Ask the user: 'Per-target metrics (one number per ITEM_*) or a "
+                        "single macro-averaged scalar?'. Pass their answer as per_label=..."
+                    ),
+                    category="missing_decision",
+                )
+        elif bundle.dataset_type == "interactions" and classification_requested:
+            requested = sorted(m for m in metrics if m in _CLASSIFICATION_METRIC_NAMES)
+            return err(
+                "MissingDecision",
+                (
+                    f"Long-format interactions bundle paired with classification metric(s) "
+                    f"{requested}. The MUST-ASK policy requires per_label to be explicit — "
+                    "per_label=True groups validation predictions by ITEM_ID and runs the "
+                    "metric per group (UniversalScorer only); per_label=False returns the "
+                    "single macro-averaged scalar per method."
+                ),
+                hint=(
+                    "Ask the user: 'Per-item classification metrics (one number per "
+                    "ITEM_ID) or a single macro-averaged scalar?'. Pass their answer "
+                    "as per_label=..."
+                ),
+                category="missing_decision",
+            )
+    if per_label is None:
+        per_label = False
+
+    # Programmatic MUST-ASK guardrail: methods="all" without prior menu
+    # listing requires explicit confirmation. Listing the menu via
+    # methods="list" and asking the user is the safer flow. Allow "all"
+    # only when the caller affirms confirmed_all=True (or has just done
+    # methods="list" and is following up — but that requires session
+    # state we don't track here, so the flag is the canonical opt-in).
+    if isinstance(methods, str) and methods == "all" and not confirmed_all:
+        return err(
+            "MissingDecision",
+            (
+                "methods='all' would run every compatible recommender. The MUST-ASK "
+                "policy expects the user to pick from the menu first. Either call "
+                "sweep_methods(methods='list') to surface the menu and let the user "
+                "choose, OR pass confirmed_all=True if the user already said 'all' / "
+                "'every option' verbatim."
+            ),
+            hint=(
+                "Default flow: call methods='list', surface the numbered menu, ask "
+                "the user which to run, then re-call with methods=[short_names]. "
+                "If the user upfront said 'try all', pass confirmed_all=True."
+            ),
+            category="missing_decision",
+        )
 
     if isinstance(methods, str) and methods == "list":
         # Menu-only mode: return the auto-sweep candidates for this contract,
@@ -926,6 +1158,30 @@ def _sweep_methods(
                     "estimator_config": m["estimator_config"],
                 }
             )
+        # Programmatic MUST-ASK guardrail: reshape-vs-stay. wide_multioutput
+        # ships only the multioutput entries today; long_interactions ships
+        # the full XGBoost + 5 embedding families. If the user wants to
+        # broaden the comparison on wide data, melting to long_interactions
+        # opens up the universal/independent scorers. Surface the option
+        # so the agent ASKS the user rather than defaulting to the narrow
+        # menu silently.
+        reshape_recommendation: str | None = None
+        if contract == "wide_multioutput":
+            # Internal agent guidance, not user-verbatim text — kept short
+            # so the agent can rephrase for context. The agent should ask
+            # before reshaping. Surfaced regardless of menu size: even when
+            # _AUTO_SWEEPS["wide_multioutput"] grows beyond today's
+            # classifier+regressor pair, the wide → long melt always opens
+            # the broader universal-scorer family. Removing the count gate
+            # avoids a silent regression if upstream ships a third wide
+            # method.
+            reshape_recommendation = (
+                f"Wide_multioutput ships {len(menu)} method(s); melting to "
+                "long_interactions (or long_with_timestamp) opens the "
+                "universal-scorer family (~6 methods). Ask the user before "
+                "reshaping."
+            )
+
         return ok(
             {
                 "bundle_id": bundle_id,
@@ -934,13 +1190,15 @@ def _sweep_methods(
                 "n_available": len(menu),
                 "n_dropped_incompatible": len(dropped),
                 "dropped_methods": dropped,
+                "reshape_recommendation": reshape_recommendation,
                 "instructions": (
                     "Surface this numbered list to the user with a brief "
                     "description of each method (tabular vs embedding family, "
                     "key hyperparameters), and ask which option(s) to run. "
                     "Then call sweep_methods again with `methods=[...]` "
-                    "containing the chosen `short_name` strings, or "
-                    "`methods='all'` to run every option."
+                    "containing the chosen `short_name` strings. To run every "
+                    "option, pass methods='all' AND confirmed_all=True only "
+                    "when the user has explicitly said 'all' / 'every'."
                 ),
             }
         )
@@ -993,6 +1251,25 @@ def _sweep_methods(
                 "BroadSweepUnavailable",
                 f"No broad sweep candidates available for contract '{contract}'.",
             )
+    elif isinstance(methods, str):
+        # Single string that wasn't one of the special tokens above —
+        # treat it as a one-element short_name list so models can ask for
+        # `methods="xgb_universal"` without first wrapping it in `[...]`.
+        # Validate against the contract's auto-sweep so a typo still fails
+        # loudly instead of silently turning into an empty sweep.
+        available = {m["short_name"]: m for m in _AUTO_SWEEPS.get(contract, [])}
+        if methods not in available:
+            return err(
+                "UnknownMethodShortName",
+                (
+                    f"methods='{methods}' is not a recognised mode "
+                    f"('auto'/'all'/'broad'/'list') and not a short_name in "
+                    f"the auto-sweep for contract '{contract}'. "
+                    f"Available short_names: {sorted(available)}. "
+                    f"To run a single method, pass it as a list: methods=['{methods}']."
+                ),
+            )
+        method_list = [available[methods]]
     elif isinstance(methods, list):
         # Accept either a list of dicts (full method config) or a list of
         # short_names referring to auto-sweep entries. The latter is what the
@@ -1012,7 +1289,8 @@ def _sweep_methods(
     else:
         return err(
             "ArgumentError",
-            "methods must be 'auto', 'all', 'broad', 'list', or an explicit list of method dicts / short_names.",
+            "methods must be 'auto', 'all', 'broad', 'list', a single short_name string, "
+            "or an explicit list of method dicts / short_names.",
         )
 
     runnable, dropped = _filter_by_capability(method_list)
@@ -1089,17 +1367,19 @@ def _sweep_methods(
             eval_top_k=eval_top_k,
             evaluator_type=evaluator_type,
             session=session,
+            per_label=per_label,
         )
         if result["status"] == "ok":
-            leaderboard.append(
-                {
-                    "method": method,
-                    "model_id": result["model_id"],
-                    "sweep_cache_id": sweep_cache_id,
-                    "status": "ok",
-                    "metrics": result["metrics"],
-                }
-            )
+            row = {
+                "method": method,
+                "model_id": result["model_id"],
+                "sweep_cache_id": sweep_cache_id,
+                "status": "ok",
+                "metrics": result["metrics"],
+            }
+            if "per_label" in result:
+                row["per_label"] = result["per_label"]
+            leaderboard.append(row)
         else:
             leaderboard.append(
                 {
@@ -1239,7 +1519,46 @@ TOOL_SWEEP_METHODS = Tool(
             "skip_existing": {"type": "boolean", "default": True},
             "auto_save_top_k": {"type": "integer", "default": 0},
             "name_prefix": {"type": "string", "default": "sweep"},
-            "drop_non_winners": {"type": "boolean", "default": False},
+            "drop_non_winners": {
+                "type": ["boolean", "null"],
+                "default": None,
+                "description": (
+                    "Whether to drop non-winning recommenders from the session "
+                    "after evaluation. Required (true or false) on bundles with "
+                    ">100K rows — the agent's MUST-ASK policy makes this an "
+                    "explicit user choice, since the retained recommenders can "
+                    "hold 1–3 GB of user embeddings on the wrong configuration. "
+                    "Defaults to False on bundles ≤100K rows."
+                ),
+            },
+            "confirmed_all": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Set True only when the user has explicitly said 'all' / "
+                    "'every method' / 'try every option' verbatim. Required when "
+                    "passing methods='all' so the agent doesn't bypass the menu "
+                    "elicitation step. Default flow: methods='list' → present "
+                    "menu → user picks → re-call with methods=[short_names]."
+                ),
+            },
+            "per_label": {
+                "type": ["boolean", "null"],
+                "default": None,
+                "description": (
+                    "Forward to each method's evaluate_model call. The MUST-ASK policy "
+                    "requires this to be explicit (true or false) on multi-target "
+                    "multioutput sweeps — defaulting silently to macro hides exactly "
+                    "the per-target detail users typically want. Defaults to False "
+                    "elsewhere. When True, classification metrics (roc_auc / pr_auc) "
+                    "return per-target dicts: for MultioutputScorer they come natively "
+                    "from scikit-rec; for long-format UniversalScorer the agent groups "
+                    "validation predictions by ITEM_ID and runs sklearn per group. Each "
+                    "leaderboard row gets a `per_label: {{metric@k: {{label: value}}}}` "
+                    "field in addition to the macro `metrics`. Rejected for ranking "
+                    "metrics (NDCG/MAP/recall@k aggregate across targets per user)."
+                ),
+            },
         },
         "required": ["bundle_id", "metrics", "primary_metric"],
     },

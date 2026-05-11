@@ -26,7 +26,13 @@ _STRATEGIES = (
 
 
 def _load_interactions(bundle) -> pd.DataFrame:
-    path = bundle.source_paths.get("interactions")
+    # Route through ``_resolve_interactions_path`` so that wide_multioutput /
+    # multiclass bundles (where users were auto-merged into the interactions
+    # frame) split on the MERGED content. Splitting the user-provided
+    # un-merged file would strip features from each post-split slice.
+    from scikit_rec_agent.tools.datasets import _resolve_interactions_path
+
+    path = _resolve_interactions_path(bundle.source_paths)
     if path is None or not os.path.exists(path):
         raise FileNotFoundError(f"bundle interactions source not found: {path}")
     return pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
@@ -180,6 +186,11 @@ def _split_data(
     result.train.to_csv(train_path, index=False)
     bundle.interactions = ds_cls(data_location=train_path, client_schema_path=inter_schema)
     bundle.source_paths["interactions"] = train_path
+    # The train slice was already extracted from the (possibly merged)
+    # frame; the auto-merge artifact is now stale. Drop it so subsequent
+    # _resolve_interactions_path calls read the post-split train file
+    # rather than the pre-split merged one.
+    bundle.source_paths.pop("merged_interactions", None)
 
     valid_path = os.path.join(tmp_dir, "valid.csv")
     result.valid.to_csv(valid_path, index=False)

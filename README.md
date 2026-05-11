@@ -50,14 +50,14 @@ Fifteen tools cover the full scikit-rec workflow — from raw data to a saved, t
 |---|---|
 | `profile_data` | Loads a CSV/parquet and reports shape, dtypes, sparsity, target type, and temporal range. Heuristic role detection for USER_ID / ITEM_ID / OUTCOME / TIMESTAMP. |
 | `validate_data` | Checks a file against scikit-rec's required schema. Suggests column-rename mappings when names are close. |
-| `transform_data` | Reshapes a raw file into one of nine scikit-rec contracts (long, long-with-timestamp, long-multi-reward, wide multi-output, multiclass, prebuilt sequences, sessions, users features, items features). Auto-detects source shape; applies pivot, melt, aggregate, dedupe, and cast as needed. |
-| `create_datasets` | Builds scikit-rec Dataset handles from file paths. Auto-generates schemas from dtypes; auto-dispatches to `InteractionsDataset` / `InteractionMultiOutputDataset` / `InteractionMultiClassDataset`. |
+| `transform_data` | Reshapes a raw file into one of nine scikit-rec contracts (long, long-with-timestamp, long-multi-reward, wide multi-output, multiclass, prebuilt sequences, sessions, users features, items features). Auto-detects source shape; applies pivot, melt, aggregate, dedupe, and cast as needed. Preserves user features across wide↔long reshapes. Surfaces a `dropped_targets` manifest when single-class ITEM_* columns are auto-dropped. |
+| `create_datasets` | Builds scikit-rec Dataset handles from file paths. Auto-generates schemas from dtypes; auto-dispatches to `InteractionsDataset` / `InteractionMultiOutputDataset` / `InteractionMultiClassDataset`. For wide multi-output / multi-class bundles, auto-merges user features into the interactions frame (the wide scorers reject a separate users frame). Refuses bad joins upfront via a USER_ID overlap check. |
 | `split_data` | Splits a bundle into train/valid/test using temporal, leave-last-n-per-user, random-split-per-user, leave-n-users-out, or random-split. Errors loudly on degenerate splits (e.g. per-user split on one-row-per-user data). |
 | `list_compatible_options` | Drives the **hierarchical model-design flow**: walks the user through recommender_type → scorer_type → estimator_type → model_type → hyperparameters one step at a time. Each option carries a `what_it_is / when_to_pick / tradeoff_vs_alternatives` triple. The terminal step returns an `assembled_config` that plugs straight into `train_model`. |
-| `train_model` | Trains a recommender from a `RecommenderConfig` dict via scikit-rec's factory. Failure envelopes carry a `category` from the diagnose registry plus a one-line `hint`. |
-| `sweep_methods` | Trains and evaluates multiple methods on the same bundle and returns a ranked leaderboard. Modes: `list` (menu only), `auto` (data-aware filter + hyperparameter resize), `all` (every entry), `broad` (every capability-compatible triple), or explicit method dicts / short_names. Idempotent across re-runs. |
-| `diagnose_training_failure` | Pattern-matches a failed `train_model` envelope against a 14-pattern registry and returns ranked candidate fixes with structured actions. Auto-retries the top safe fix; bounded by `max_retries` to prevent loops. |
-| `evaluate_model` | Runs offline evaluation on a trained model with any of 7 evaluator types × 9 metrics at multiple k values. Auto-builds `eval_kwargs` from the bundle's validation interactions for the `simple` evaluator. |
+| `train_model` | Trains a recommender from a `RecommenderConfig` dict via scikit-rec's factory. Accepts a `scorer_config` block (e.g. `{'on_degenerate_target': 'constant'}` to enable MultioutputScorer's constant-predictor fallback for single-class targets). Auto-picks a curated default config when none is supplied. Failure envelopes carry a `category` from the diagnose registry plus a one-line `hint`. |
+| `sweep_methods` | Trains and evaluates multiple methods on the same bundle and returns a ranked leaderboard. Modes: `list` (menu only — adds a `reshape_recommendation` field when wide_multioutput could be widened by melting to long), `auto` (data-aware filter + hyperparameter resize), `all` (every entry — requires `confirmed_all=True`), `broad` (every capability-compatible triple), or explicit method dicts / short_names. Required to set `drop_non_winners` explicitly on >100K-row bundles. Idempotent across re-runs. |
+| `diagnose_training_failure` | Pattern-matches a failed `train_model` envelope against a 26-pattern registry and returns ranked candidate fixes with structured actions. Auto-retries the top safe fix; bounded by `max_retries` to prevent loops. Multioutput-specific patterns (binary-only targets, retriever incompatibility, item_subset rejection, users-frame rejection, single-class targets) walk before generic sklearn fallbacks so the more-specific diagnosis fires first. |
+| `evaluate_model` | Runs offline evaluation on a trained model with any of 7 evaluator types × 9 metrics at multiple k values. Auto-builds `eval_kwargs` from the bundle's validation interactions for the `simple` evaluator (including the wide multi-output shape — `(n_users, n_targets)` logged_rewards from ITEM_* columns). Returns per-target metrics with `per_label=True` on MultioutputScorer (classification + regression) or long-format UniversalScorer (roc_auc / pr_auc). Non-@k metrics (rmse, mae, roc_auc, pr_auc) compute once regardless of k_values. |
 | `compare_models` | Renders a markdown leaderboard across all (or a chosen subset of) trained models in the session, sorted by a primary metric. |
 | `run_hpo` | Optuna-driven hyperparameter search over a user-specified `search_space`. Persists the best config and writes the tuned model into the session. |
 | `save_model` | Persists a trained model to the local file-based registry with optional tags. |
@@ -65,6 +65,27 @@ Fifteen tools cover the full scikit-rec workflow — from raw data to a saved, t
 | `load_model` | Restores a saved model into the current session for further use. |
 
 The system prompt is built at import time from scikit-rec's live enum maps, so new recommender / scorer / estimator types get picked up automatically.
+
+### Multi-output / multi-target workflows
+
+The wide_multioutput contract — one row per user, several `ITEM_*` columns as joint prediction targets — is fully supported end-to-end:
+
+- **Classifier and regressor modes**: binary `ITEM_*` columns route to MultioutputScorer (classifier); continuous `ITEM_*` route to regressor mode. The auto-sweep ships both `xgb_multioutput` and `xgb_multioutput_regression`; the data profile picks the right one based on the column dtype.
+- **Per-target metrics**: pass `per_label=True` to `evaluate_model` or `sweep_methods` to get `Dict[str, float]` keyed by ITEM_* name. The macro-averaged scalar is the default; per-target is the deliberate "show me each label" path.
+- **Degenerate single-class targets**: `transform_data` auto-drops them by default and lists them in `dropped_targets`. To keep them with a constant-predictor fallback, pass `scorer_config={'on_degenerate_target': 'constant'}` to `train_model` instead — `degenerate_targets` then surfaces in the train envelope.
+- **Long-format equivalent**: melt the wide contract into long_interactions with `transform_data` to broaden the comparison to the universal-scorer methods (XGBoost, MF, NCF, Two-Tower, DCN, NFM). Side features are preserved across the reshape.
+
+### "Ask before deciding" — programmatic backstop
+
+Five user-decision points are enforced as `MissingDecision` error envelopes at the tool layer (not just prompt guidance) so an LLM that ignores the system prompt can't silently default through them:
+
+- **Primary metric** — required schema field on `sweep_methods` and `compare_models`.
+- **`per_label`** — required on multioutput bundles with ≥2 ITEM_* targets (default None → MissingDecision).
+- **`drop_non_winners`** — required on bundles >100K rows (default None → MissingDecision). MF + NCF + Two-Tower together can hold 1–3 GB of user embeddings.
+- **`methods='all'`** — requires `confirmed_all=True` so the menu-pick flow isn't bypassed.
+- **Reshape vs stay** — `sweep_methods(methods='list')` on wide_multioutput surfaces a `reshape_recommendation` field for the agent to relay.
+
+When you receive a `MissingDecision` envelope, read its `message` for the question and re-call the tool with the user's answer in the named parameter.
 
 ## How to talk to it
 
@@ -134,7 +155,7 @@ See [`examples/transcripts/movielens_hierarchical_session.md`](examples/transcri
  message: 'Input contains NaN', ...}. Help."
 ```
 
-The agent calls `diagnose_training_failure`, pattern-matches the error against a 14-pattern registry, returns ranked candidate fixes with structured actions. Bounded retries (max 2 per `model_name`) prevent loops; if the category is `unknown`, it surfaces the raw error to you instead of guessing.
+The agent calls `diagnose_training_failure`, pattern-matches the error against a 26-pattern registry, returns ranked candidate fixes with structured actions. Bounded retries (max 2 per `model_name`) prevent loops; if the category is `unknown`, it surfaces the raw error to you instead of guessing.
 
 ### What the agent will ask back
 

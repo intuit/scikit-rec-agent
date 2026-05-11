@@ -155,6 +155,123 @@ def test_create_datasets_long_format_still_defaults_to_interactions(binary_rewar
     assert result["data"]["dataset_type"] == "interactions"
 
 
+def test_check_user_id_overlap_uses_full_intersection_not_first_10k(tmp_path):
+    """previously used .unique()[:10000] which respects first-seen order.
+    On >10k-user frames where the real overlap lived past the first 10k of
+    either side, the guard false-positived. Full set intersection fixes it.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import _check_user_id_overlap
+
+    # 15k unique IDs on each side, but the overlap is entirely past index
+    # 10k. The OLD code would sample [0..9999] from each side and report
+    # 'no overlap' — a false positive that wasted the user's time.
+    inter_ids = [f"INT_only_{i}" for i in range(10500)] + [f"SHARED_{i}" for i in range(4500)]
+    user_ids = [f"USER_only_{i}" for i in range(10500)] + [f"SHARED_{i}" for i in range(4500)]
+    inter_df = pd.DataFrame({"USER_ID": inter_ids})
+    u_df = pd.DataFrame({"USER_ID": user_ids})
+
+    result = _check_user_id_overlap(inter_df, u_df, context="test")
+    # 4500 shared IDs at index >=10500 — full intersection sees them; old
+    # truncation-to-10k would have missed them.
+    assert result is None, "overlap check should have found shared IDs past index 10k"
+
+
+def test_check_user_id_overlap_still_rejects_true_disjoint_sets():
+    """Sanity: the overlap check still catches actual disjoint frames
+    (the original bug it was written to prevent). Without this, the
+    full-intersection change might over-correct."""
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import _check_user_id_overlap
+
+    inter_df = pd.DataFrame({"USER_ID": ["company_a", "company_b", "company_c"]})
+    u_df = pd.DataFrame({"USER_ID": ["180", "270", "365"]})  # mistaken feature-as-id
+
+    result = _check_user_id_overlap(inter_df, u_df, context="test")
+    assert result is not None
+    assert result["error_type"] == "UserIdOverlapZero"
+    assert result["category"] == "user_id_overlap_zero"
+
+
+def test_resolve_interactions_path_prefers_merged(binary_reward_paths, session):
+    """after auto-merge fires, source_paths['interactions'] continues
+    to point at the user-provided file (back-compat), and a new
+    source_paths['merged_interactions'] key carries the merged path.
+    Internal consumers route through _resolve_interactions_path which
+    prefers the merged path when present.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.datasets import (
+        TOOL_CREATE_DATASETS,
+        _resolve_interactions_path,
+    )
+
+    # Wide multi-output frame + separate users frame — triggers auto-merge.
+    inter_df = pd.DataFrame(
+        {
+            "USER_ID": ["u1", "u2", "u3"],
+            "ITEM_a": [1, 0, 1],
+            "ITEM_b": [0, 1, 1],
+        }
+    )
+    users_df = pd.DataFrame({"USER_ID": ["u1", "u2", "u3"], "feat1": [10, 20, 30]})
+
+    inter_p = "/tmp/_r3_inter.csv"
+    users_p = "/tmp/_r3_users.csv"
+    inter_df.to_csv(inter_p, index=False)
+    users_df.to_csv(users_p, index=False)
+
+    result = TOOL_CREATE_DATASETS.fn(
+        bundle_id="r3",
+        interactions_path=inter_p,
+        users_path=users_p,
+        session=session,
+    )
+    assert result["status"] == "ok", result
+
+    bundle = session.loaded_datasets["r3"]
+    sp = bundle.source_paths
+
+    # source_paths["interactions"] = user-provided path (NOT the merged one).
+    # Previously, auto-merge silently overwrote this key with the merged
+    # path, losing the original. Pin the new contract.
+    assert sp["interactions"] == inter_p
+
+    # merged_interactions key exists and points at the merged frame.
+    assert "merged_interactions" in sp
+    merged_df = pd.read_csv(sp["merged_interactions"])
+    assert "feat1" in merged_df.columns
+
+    # Helper picks the merged path when present so internal consumers
+    # (sweep profile, split, eval) read the data the dataset object uses.
+    assert _resolve_interactions_path(sp) == sp["merged_interactions"]
+
+
+def test_resolve_interactions_path_falls_back_to_original_without_merge(binary_reward_paths, session):
+    """For non-wide bundles (no auto-merge), source_paths['merged_interactions']
+    is absent; _resolve_interactions_path returns source_paths['interactions'].
+    Pin the no-merge fallback so the helper doesn't accidentally hide a real
+    missing-path bug on long bundles.
+    """
+    from scikit_rec_agent.tools.datasets import (
+        TOOL_CREATE_DATASETS,
+        _resolve_interactions_path,
+    )
+
+    TOOL_CREATE_DATASETS.fn(
+        bundle_id="lb",
+        interactions_path=binary_reward_paths["interactions"],
+        session=session,
+    )
+    bundle = session.loaded_datasets["lb"]
+    sp = bundle.source_paths
+    assert "merged_interactions" not in sp
+    assert _resolve_interactions_path(sp) == sp["interactions"]
+
+
 def test_create_datasets_coerces_integer_outcome_to_float(tmp_path, session):
     # Regression: binary click logs arrive as OUTCOME in {0, 1}, which pandas
     # infers as int64. scikit-rec's required interactions schema declares

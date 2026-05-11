@@ -140,6 +140,104 @@ def _write_schema(df: pd.DataFrame, name: str, tmp_dir: str, explicit: str | Non
     return out_path
 
 
+def _resolve_interactions_path(source_paths: dict[str, str]) -> str | None:
+    """Return the interactions path internal consumers should READ from.
+
+    Prefers ``merged_interactions`` when present (set by create_datasets
+    when it auto-merged users into the interactions frame for wide
+    multi-output / multi-class bundles), else falls back to the canonical
+    ``interactions`` key. The split is intentional: external callers that
+    want the user-provided file continue to read ``source_paths["interactions"]``
+    directly; internal callers that need the actual data the dataset
+    object was constructed from route through this helper.
+
+    Lifecycle of ``source_paths`` across the three phases:
+
+    - **Post-create_datasets, pre-split**:
+      ``source_paths["interactions"]`` = user-provided file (or its
+      column-mapped copy if ``column_mapping`` was passed). When auto-
+      merge fires (wide_multioutput / multiclass bundles with users_path),
+      ``source_paths["merged_interactions"]`` additionally holds the
+      merged frame.
+    - **Post-split_data**: ``source_paths["interactions"]`` is overwritten
+      with the post-split TRAIN slice (split_data.py). The
+      ``merged_interactions`` key is popped — the merged content was the
+      input to the split, so the post-split slices are the new source of
+      truth. ``source_paths["valid_interactions"]`` and
+      ``source_paths["test_interactions"]`` carry the other slices.
+    - **External access**: callers wanting the user-provided path
+      pre-split read ``source_paths["interactions"]`` directly. After
+      split that key has shifted semantically; the user-provided path is
+      no longer recoverable from the bundle. Callers that need it across
+      the lifecycle should capture it themselves at create_datasets time.
+    """
+    return source_paths.get("merged_interactions") or source_paths.get("interactions")
+
+
+def _check_user_id_overlap(
+    inter_df: "pd.DataFrame",
+    u_df: "pd.DataFrame",
+    context: str = "join",
+) -> dict[str, Any] | None:
+    """Refuse to attach a users dataset whose USER_ID values share zero
+    rows with the interactions frame.
+
+    The most common cause is a wrong ``user_id_column`` argument to a
+    prior ``transform_data`` call: passing a feature column name (e.g.
+    ``users_w180``) renames the wrong column to ``USER_ID``, the
+    resulting frame's USER_IDs are arbitrary feature values, and the
+    join silently drops every row (wide path: NaN features after
+    merge; long path: scikit-rec's
+    ``_join_data_train`` raises ``Interactions Dataset contains Users
+    not present in the Users Dataset!`` deep inside training).
+
+    Computes the full intersection over both frames' USER_IDs and
+    short-circuits when it's empty. Returns an error envelope on failure
+    or ``None`` when the overlap looks fine.
+
+    Previously truncated each side to the first 10k uniques as a "cheap"
+    check — but ``.unique()`` returns values in first-seen order, so on
+    >10k-user datasets where the real overlap lived past the first 10k
+    of either side the guard false-positived. Full ``set & set`` is
+    correct rather than fast: a Python string occupies ~50–80 bytes plus
+    set overhead, so two 1M-user frames cost ~150–200 MB peak RSS and
+    finish in well under a second; a 50M-user frame approaches 5–10 GB
+    and tens of seconds. The agent's typical workloads (sample slices,
+    QBO-Advanced-scale tenants) stay well inside the cheap regime; very
+    large customer bases should profile RSS before calling this guard
+    repeatedly.
+    """
+    inter_ids = set(inter_df["USER_ID"].astype(str).unique())
+    u_ids = set(u_df["USER_ID"].astype(str).unique())
+    if not inter_ids or not u_ids:
+        return None
+    if inter_ids & u_ids:
+        return None
+    sample_inter = sorted(inter_ids)[:3]
+    sample_users = sorted(u_ids)[:3]
+    return err(
+        "UserIdOverlapZero",
+        (
+            f"USER_ID values in the interactions and users frames don't overlap at "
+            f"all (checked {context}). Sample values — interactions: {sample_inter} ; "
+            f"users: {sample_users}. The most common cause is a wrong `user_id_column` "
+            f"argument on a previous `transform_data` call: passing a feature column "
+            f"name (e.g. a `_w180` count or a small-int aggregate) instead of the real "
+            f"identifier column renames the wrong column to USER_ID, and the resulting "
+            f"frame's USER_ID values are arbitrary feature values that don't align with "
+            f"the interactions' real IDs. Re-run `transform_data target_contract="
+            f"'users_features'` with `user_id_column` set to the actual identifier "
+            f"column (e.g. `qbo_company_id`, `customer_id`)."
+        ),
+        hint=(
+            "Compare the USER_ID samples above. If the users frame's USER_IDs look "
+            "like feature values (small ints, decimals, dates) rather than real "
+            "customer / item identifiers, that's the bug."
+        ),
+        category="user_id_overlap_zero",
+    )
+
+
 def _create_datasets(
     bundle_id: str,
     interactions_path: str,
@@ -187,16 +285,88 @@ def _create_datasets(
         inter_path, inter_df = _prepare_source(interactions_path, column_mapping, tmp_dir)
         resolved_dataset_type = dataset_type or _detect_dataset_type(inter_df)
         ds_cls = _DATASET_CLASS[resolved_dataset_type]
+
+        # Wide multi-output / multi-class scorers (MultioutputScorer /
+        # MulticlassScorer) reject separate user/item DataFrames — they
+        # consume features as plain columns inside the interactions
+        # frame alongside USER_ID + ITEM_*. So instead of failing mid-
+        # sweep with a stack trace from inside scikit-rec, merge the
+        # features into the interactions frame here, on USER_ID, before
+        # the bundle is wired up.
+        merged_extras: dict[str, str] = {}
+        if resolved_dataset_type in ("interaction_multioutput", "interaction_multiclass"):
+            if users_path:
+                if not os.path.exists(users_path):
+                    return err("FileNotFoundError", f"users_path not found: {users_path}")
+                _, u_df = _prepare_source(users_path, column_mapping, tmp_dir)
+                if "USER_ID" not in u_df.columns:
+                    return err(
+                        "MissingUserId",
+                        "users_path lacks a USER_ID column; can't merge into the wide-format interactions frame.",
+                    )
+                overlap_err = _check_user_id_overlap(inter_df, u_df, context="auto-merge")
+                if overlap_err is not None:
+                    return overlap_err
+                inter_df = inter_df.merge(u_df, on="USER_ID", how="left")
+                merged_extras["users"] = users_path
+                users_path = None
+            if items_path:
+                # Wide multi-output / multi-class encode items as ITEM_* target
+                # columns — there is no row-level ITEM_ID to join item features
+                # against. Refuse rather than silently drop the file.
+                return err(
+                    "IncompatibleItemFeatures",
+                    (
+                        f"{resolved_dataset_type.replace('interaction_', '')} bundles encode items as "
+                        "ITEM_* target columns and have no ITEM_ID to join an items_path against. "
+                        "Drop items_path, or melt to long_interactions if you need item-level features."
+                    ),
+                    hint="Re-call create_datasets without items_path, or transform_data → long_interactions first.",
+                    category="incompatible_side_features",
+                )
+            if merged_extras:
+                # Persist the merged frame so downstream tools (split_data,
+                # train_model) read consistent file content. The auto-merge
+                # does NOT overwrite source_paths["interactions"] — that key
+                # continues to point at the user-provided file (back-compat
+                # for any consumer that wants the original). Internal
+                # consumers route through ``_resolve_interactions_path``,
+                # which prefers ``merged_interactions`` when present.
+                merged_path = os.path.join(tmp_dir, "interactions_merged.csv")
+                inter_df.to_csv(merged_path, index=False)
+                source_paths["merged_interactions"] = merged_path
+
         inter_schema = _write_schema(inter_df, "interactions", tmp_dir, schemas.get("interactions"))
         schema_paths["interactions"] = inter_schema
         source_paths["interactions"] = inter_path
-        interactions_ds = ds_cls(data_location=inter_path, client_schema_path=inter_schema)
+        # If an auto-merge fired, the dataset object must read the merged
+        # content (else the wide-format scorers see no features). Original
+        # interactions_path stays accessible via source_paths["interactions"].
+        ds_read_path = source_paths.get("merged_interactions", inter_path)
+        interactions_ds = ds_cls(data_location=ds_read_path, client_schema_path=inter_schema)
 
         users_ds = None
         if users_path:
             if not os.path.exists(users_path):
                 return err("FileNotFoundError", f"users_path not found: {users_path}")
             u_path, u_df = _prepare_source(users_path, column_mapping, tmp_dir)
+            if "USER_ID" not in u_df.columns:
+                return err(
+                    "MissingUserId",
+                    "users_path lacks a USER_ID column. Re-run transform_data "
+                    "target_contract='users_features' with user_id_column set to the real "
+                    "customer identifier column.",
+                )
+            # Same alignment guard as the wide_multioutput auto-merge: refuse
+            # to attach a users dataset whose USER_ID values share zero rows
+            # with the interactions frame. Without this, scikit-rec's
+            # _join_data_train at training time would raise the cryptic
+            # "Interactions Dataset contains Users not present in the Users
+            # Dataset!" with no pointer at the upstream wrong-user_id_column
+            # cause.
+            overlap_err = _check_user_id_overlap(inter_df, u_df, context="long-format join")
+            if overlap_err is not None:
+                return overlap_err
             u_schema = _write_schema(u_df, "users", tmp_dir, schemas.get("users"))
             schema_paths["users"] = u_schema
             source_paths["users"] = u_path
@@ -243,19 +413,23 @@ def _create_datasets(
     )
     session.loaded_datasets[bundle_id] = bundle
 
-    return ok(
-        {
-            "bundle_id": bundle_id,
-            "dataset_type": resolved_dataset_type,
-            "schema_paths": schema_paths,
-            "columns": list(inter_df.columns),
-            "n_interactions": int(len(inter_df)),
-            "has_users": users_ds is not None,
-            "has_items": items_ds is not None,
-            "has_valid": valid_ds is not None,
-            "has_test": test_ds is not None,
-        }
-    )
+    payload = {
+        "bundle_id": bundle_id,
+        "dataset_type": resolved_dataset_type,
+        "schema_paths": schema_paths,
+        "columns": list(inter_df.columns),
+        "n_interactions": int(len(inter_df)),
+        "has_users": users_ds is not None,
+        "has_items": items_ds is not None,
+        "has_valid": valid_ds is not None,
+        "has_test": test_ds is not None,
+    }
+    if merged_extras:
+        # Surface the silent merge so downstream tools (and the agent) can
+        # see that user/item features were folded into the interactions
+        # frame rather than carried as a separate dataset.
+        payload["merged_into_interactions"] = list(merged_extras)
+    return ok(payload)
 
 
 TOOL_CREATE_DATASETS = Tool(

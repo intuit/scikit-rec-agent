@@ -185,6 +185,54 @@ def test_match_unknown_falls_through():
     assert d.fixes == []
 
 
+def test_match_multioutput_users_dataframe_rejected_verbatim_upstream():
+    """upstream emits ``Multioutput Scorer cannot accept Users
+    Dataframe, set it to None!`` — note the SPACE between Multioutput and
+    Scorer. Previous regex required them concatenated and silently never
+    matched. Pin verbatim upstream wording here so a future rename surfaces
+    as a test failure rather than a silent miss.
+    """
+    env = {
+        "error_type": "ValueError",
+        "message": "Multioutput Scorer cannot accept Users Dataframe, set it to None!",
+    }
+    d = _match(env)
+    assert d.category == "multioutput_users_dataframe_rejected"
+
+
+def test_match_multioutput_specific_wins_over_generic_single_class():
+    """when a message could plausibly match both the generic
+    sklearn single_class_target pattern and the multioutput-specific one,
+    registry order ensures the more-specific multioutput pattern fires
+    first. Hand-craft a message containing both verbatim phrases and pin
+    the precedence.
+    """
+    env = {
+        "error_type": "ValueError",
+        "message": (
+            "MultioutputScorer: target column(s) with a single class in the training "
+            "slice cannot be fit (sklearn under the hood would have said: y contains only 1 class)."
+        ),
+    }
+    d = _match(env)
+    assert d.category == "multioutput_single_class_target"
+
+
+def test_match_invalid_scorer_config_key():
+    """when the factory (or train_model's pre-check) rejects
+    an unsupported scorer_config key, diagnose catches it via the new
+    pattern so the LLM gets an actionable fix.
+    """
+    env = {
+        "error_type": "ValueError",
+        "message": (
+            "scorer_type='multiclass' does not accept scorer_config keys: ['on_degenerate_target']. Accepted keys: ()."
+        ),
+    }
+    d = _match(env)
+    assert d.category == "invalid_scorer_config_key"
+
+
 # ---------------------------------------------------------------------------
 # _quick_diagnose smoke
 # ---------------------------------------------------------------------------

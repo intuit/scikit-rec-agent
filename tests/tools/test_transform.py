@@ -465,6 +465,169 @@ def test_validate_against_contract_catches_dupes():
     assert any("duplicates" in i.lower() for i in res["issues"])
 
 
+def test_wide_multioutput_non_binary_string_targets_rejected_with_friendly_message(tmp_path, session):
+    """classification of non-numeric ITEM_* targets runs BEFORE the
+    float cast. Without the reorder, the cast at _op_cast_dtypes raises
+    pandas' opaque ``could not convert string to float: 'yes'`` and the
+    friendly migration message never fires. The reorder makes the user-
+    facing error explain the issue + the migration paths.
+    """
+    df = pd.DataFrame(
+        {
+            "uid": ["u1", "u2", "u3"],
+            "label_a": ["yes", "no", "yes"],
+            "label_b": ["yes", "yes", "no"],
+        }
+    )
+    src = tmp_path / "wide_strings.csv"
+    df.to_csv(src, index=False)
+    out = str(tmp_path / "transformed.csv")
+    result = TOOL_TRANSFORM_DATA.fn(
+        file_path=str(src),
+        output_path=out,
+        target_contract="wide_multioutput",
+        user_id_column="uid",
+        target_rename_pattern=r"label_(.*)",
+        session=session,
+    )
+    assert result["status"] == "error"
+    msg = result["message"].lower()
+    # Must mention binary-numeric requirement AND surface the bad values
+    # AND name at least one of the affected columns. The previous error
+    # path produced pandas' generic "could not convert string to float".
+    assert "binary numeric" in msg
+    assert "yes" in msg
+    assert any(c in result["message"] for c in ("ITEM_a", "ITEM_b"))
+
+
+def test_classify_wide_multioutput_targets_coerces_string_numerics():
+    """object-dtype ITEM_* columns with values like ['1', '0', '1']
+    cast cleanly to binary numeric — the helper coerces them via
+    pd.to_numeric before deciding 'non-binary'. Without this, a clean
+    CSV round-trip of {0, 1} that pandas read as object dtype would
+    surface a misleading 'non-binary' error.
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.transform import _classify_wide_multioutput_targets
+
+    df = pd.DataFrame(
+        {
+            "USER_ID": ["u1", "u2", "u3", "u4"],
+            "ITEM_string_binary": ["1", "0", "1", "0"],
+            "ITEM_string_genuine_text": ["yes", "no", "yes", "no"],
+        }
+    )
+    bad_non_binary, degenerate, ok_cols = _classify_wide_multioutput_targets(df)
+
+    # The string-but-numeric column coerces and lands in ok
+    assert "ITEM_string_binary" in ok_cols
+    # The genuine-text column still flagged as non-binary
+    assert any(c == "ITEM_string_genuine_text" for c, _ in bad_non_binary)
+
+
+def test_classify_wide_multioutput_targets_three_bins():
+    """Unit cover for _classify_wide_multioutput_targets — the helper at
+    the heart of the wide_multioutput rejection / auto-drop logic. Sorts
+    columns into three bins:
+      - bad_non_binary: non-numeric or non-{0,1} values
+      - degenerate: single-class
+      - ok: binary numeric with both classes present
+    """
+    import pandas as pd
+
+    from scikit_rec_agent.tools.transform import _classify_wide_multioutput_targets
+
+    df = pd.DataFrame(
+        {
+            "USER_ID": ["u1", "u2", "u3", "u4"],
+            "ITEM_ok_a": [0, 1, 1, 0],  # both classes — ok
+            "ITEM_ok_b": [1.0, 0.0, 0.0, 1.0],
+            "ITEM_dead": [0, 0, 0, 0],  # single-class — degenerate
+            "ITEM_strings": ["yes", "no", "yes", "no"],  # non-numeric
+            "ITEM_multi": [0, 1, 2, 0],  # multi-class
+        }
+    )
+    bad_non_binary, degenerate, ok_cols = _classify_wide_multioutput_targets(df)
+
+    bad_names = {c for c, _ in bad_non_binary}
+    deg_names = {c for c, _ in degenerate}
+    assert bad_names == {"ITEM_strings", "ITEM_multi"}
+    assert deg_names == {"ITEM_dead"}
+    assert set(ok_cols) == {"ITEM_ok_a", "ITEM_ok_b"}
+
+
+def test_compute_long_per_label_metric_handles_degenerate_per_item():
+    """Unit cover for _compute_long_per_label_metric — items where the
+    masked y_true has fewer than 2 classes get NaN (sklearn would raise);
+    items with valid signal get the metric value.
+    """
+    import math
+
+    import numpy as np
+
+    from scikit_rec_agent.tools.evaluation import _compute_long_per_label_metric
+
+    # Two items: 'good' has both classes, 'dead' has only class 1 (degenerate)
+    predictions = {
+        "items": ["good", "dead"],
+        "y_true": np.array(
+            [
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ]
+        ),
+        "y_score": np.array(
+            [
+                [0.8, 0.5],
+                [0.2, 0.4],
+                [0.9, 0.7],
+                [0.1, 0.3],
+            ]
+        ),
+    }
+    result = _compute_long_per_label_metric("roc_auc", predictions)
+    assert result["good"] == 1.0  # perfect separation
+    assert math.isnan(result["dead"])
+
+
+def test_wide_multioutput_all_degenerate_surfaces_surviving_columns(tmp_path, session):
+    """when every (or all-but-one) ITEM_* target is single-class, the
+    error must surface the surviving non-degenerate column(s) so the user
+    can decide to keep it manually. Prior message listed only the
+    degenerate columns, hiding the survivor.
+    """
+    df = pd.DataFrame(
+        {
+            "uid": ["u1", "u2", "u3", "u4"],
+            "label_dead_a": [1, 1, 1, 1],
+            "label_dead_b": [0, 0, 0, 0],
+            "label_alive": [0, 1, 1, 0],
+        }
+    )
+    src = tmp_path / "wide_deg.csv"
+    df.to_csv(src, index=False)
+    out = str(tmp_path / "transformed.csv")
+    result = TOOL_TRANSFORM_DATA.fn(
+        file_path=str(src),
+        output_path=out,
+        target_contract="wide_multioutput",
+        user_id_column="uid",
+        target_rename_pattern=r"label_(.*)",
+        session=session,
+    )
+    assert result["status"] == "error"
+    msg = result["message"]
+    # Both degenerate names AND the surviving one must appear, so the user
+    # can decide to keep it as a single-target problem.
+    assert "ITEM_dead_a" in msg
+    assert "ITEM_dead_b" in msg
+    assert "ITEM_alive" in msg
+    assert "surviving" in msg.lower()
+
+
 def test_validate_against_contract_catches_missing_targets():
     df = pd.DataFrame({"USER_ID": ["a"], "ITEM_x": [1]})
     res = _validate_against_contract(df, "wide_multioutput")

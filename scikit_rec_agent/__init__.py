@@ -29,7 +29,7 @@ from scikit_rec_agent.agent import Agent, AgentEvent  # noqa: E402
 from scikit_rec_agent.llm.base import BaseLLM, LLMResponse, LLMStreamEvent, ToolCall  # noqa: E402
 from scikit_rec_agent.prompts import DEFAULT_SYSTEM_PROMPT  # noqa: E402
 from scikit_rec_agent.session import DatasetBundle, ModelHandle, Session  # noqa: E402
-from scikit_rec_agent.tools import Tool, get_default_tools  # noqa: E402
+from scikit_rec_agent.tools import Tool, err, get_default_tools, ok  # noqa: E402
 
 __all__ = [
     "Agent",
@@ -44,4 +44,6 @@ __all__ = [
     "Session",
     "Tool",
     "get_default_tools",
+    "ok",
+    "err",
 ]

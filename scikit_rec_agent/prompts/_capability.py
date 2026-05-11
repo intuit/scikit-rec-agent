@@ -8,8 +8,6 @@ the next agent run — no manual sync required.
 
 from __future__ import annotations
 
-from skrec.evaluator.datatypes import RecommenderEvaluatorType
-from skrec.metrics.datatypes import RecommenderMetricType
 from skrec.orchestrator import (
     ESTIMATOR_TYPES,
     RECOMMENDER_TYPES,
@@ -20,18 +18,20 @@ from skrec.orchestrator import (
 )
 
 
-def _evaluator_types() -> tuple[str, ...]:
-    return tuple(e.value for e in RecommenderEvaluatorType)
+def _init_eval_metric_types() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    cm = _factory_capability_matrix()
+    if "evaluator_types" in cm and "metric_types" in cm:
+        return cm["evaluator_types"], cm["metric_types"]
+    from skrec.evaluator.datatypes import RecommenderEvaluatorType
+    from skrec.metrics.datatypes import RecommenderMetricType
+    return (
+        tuple(e.value for e in RecommenderEvaluatorType),
+        tuple(m.value for m in RecommenderMetricType),
+    )
 
 
-def _metric_types() -> tuple[str, ...]:
-    return tuple(m.value for m in RecommenderMetricType)
-
-
-# Back-compat re-exports. Tests in tests/test_prompts.py read these names;
-# keep them pointed at the public scikit-rec source.
-EVALUATOR_TYPES: tuple[str, ...] = _evaluator_types()
-METRIC_TYPES: tuple[str, ...] = _metric_types()
+# Back-compat re-exports. Tests in tests/test_prompts.py read these names.
+EVALUATOR_TYPES, METRIC_TYPES = _init_eval_metric_types()
 
 
 def embedding_model_types() -> tuple[str, ...]:
@@ -52,10 +52,12 @@ def retriever_types() -> tuple[str, ...]:
 
 def capability_matrix() -> str:
     cm = _factory_capability_matrix()
+    tabular_model_types = cm.get("tabular_model_types", ("xgboost",))
     lines = [
         f"- recommender_type ∈ {{{', '.join(RECOMMENDER_TYPES)}}}",
         f"- scorer_type ∈ {{{', '.join(SCORER_TYPES)}}}",
         f"- estimator_type ∈ {{{', '.join(ESTIMATOR_TYPES)}}}",
+        f"- tabular model_type ∈ {{{', '.join(tabular_model_types)}}}",
         f"- embedding model_type ∈ {{{', '.join(cm['embedding_model_types'])}}}",
         f"- sequential model_type ∈ {{{', '.join(cm['sequential_model_types'])}}}",
         f"- inference_method.type ∈ {{{', '.join(cm['inference_method_types'])}}}",

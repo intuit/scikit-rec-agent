@@ -285,18 +285,47 @@ ESTIMATOR_TYPE_EXPLANATIONS: dict[str, dict[str, str]] = {
 # different scikit-rec maps.
 # ---------------------------------------------------------------------------
 
-# tabular has only XGBoost via the orchestrator factory today; we expose it as
-# a single virtual choice so the hierarchy stays uniform.
 TABULAR_MODEL_EXPLANATIONS: dict[str, dict[str, str]] = {
     "xgboost": {
         "what_it_is": (
             "XGBoost gradient-boosted trees. ml_task is auto-derived from your target "
             "(classification for binary / categorical, regression for continuous)."
         ),
-        "when_to_pick": ("Default tabular pick — always available, fast to train, strong baseline."),
+        "when_to_pick": "Default tabular pick — always available, fast to train, strong baseline.",
         "tradeoff_vs_alternatives": (
-            "Only tabular family currently exposed via scikit-rec's orchestrator. LightGBM and "
-            "LogReg estimators exist in scikit-rec but aren't yet routed through the factory."
+            "Generally faster to train than LightGBM on smaller datasets; slightly heavier memory "
+            "footprint. Strong default when LightGBM behaviour is untested on the data."
+        ),
+    },
+    "lightgbm": {
+        "what_it_is": (
+            "LightGBM gradient-boosted trees. Leaf-wise growth with histogram binning. "
+            "ml_task is auto-derived the same way as XGBoost."
+        ),
+        "when_to_pick": (
+            "Large tabular datasets (>100K rows) or high-cardinality categoricals where LightGBM's "
+            "leaf-wise splits and native categorical handling give a speed/accuracy edge over XGBoost."
+        ),
+        "tradeoff_vs_alternatives": (
+            "Often faster than XGBoost on large data; more prone to overfitting on small datasets "
+            "without careful num_leaves / min_child_samples tuning. Requires lightgbm>=4.6.0 "
+            "(already a scikit-rec core dependency)."
+        ),
+    },
+    "deepfm": {
+        "what_it_is": (
+            "DeepFM classifier — factorisation machine + DNN over flat tabular features. "
+            "Tabular input shape, PyTorch training. Classification only."
+        ),
+        "when_to_pick": (
+            "Large datasets with many sparse or interaction-heavy features where explicit "
+            "second-order feature interactions help (e.g. rich side-feature catalogs with "
+            "user × item cross terms)."
+        ),
+        "tradeoff_vs_alternatives": (
+            "Requires scikit-rec[torch]. Only supports ml_task='classification'. "
+            "Slower to train than tree methods; gains come from automatic feature-interaction "
+            "learning without manual feature engineering. Needs more data than XGBoost to pay off."
         ),
     },
 }

@@ -5,13 +5,23 @@ from __future__ import annotations
 from scikit_rec_agent.prompts._capability import capability_matrix
 
 _CANONICAL_CONFIGS = """\
-1. Tabular ranking (fast baseline, handles side features well)
+1a. Tabular ranking — XGBoost (fast baseline, handles side features well)
 {
   "recommender_type": "ranking",
   "scorer_type": "universal",
   "estimator_config": {
     "ml_task": "classification",
     "xgboost": {"n_estimators": 100, "max_depth": 5, "learning_rate": 0.1}
+  }
+}
+
+1b. Tabular ranking — LightGBM (leaf-wise; faster on large data, native categoricals)
+{
+  "recommender_type": "ranking",
+  "scorer_type": "universal",
+  "estimator_config": {
+    "ml_task": "classification",
+    "lightgbm": {"n_estimators": 200, "num_leaves": 63, "learning_rate": 0.05}
   }
 }
 
@@ -69,11 +79,16 @@ _CANONICAL_CONFIGS = """\
 _HEURISTICS = """\
 Decision heuristics:
 - Data size: embedding models (Two-Tower, NCF, DCN, NFM) need ~100K+ interactions
-  to beat a well-tuned XGBoost baseline. Below that, prefer tabular ranking.
+  to beat a well-tuned XGBoost/LightGBM baseline. Below that, prefer tabular ranking.
+- Tabular model choice: XGBoost is the safe default. Prefer LightGBM when data has
+  >100K rows, high-cardinality categoricals, or the user asks for a faster baseline.
+  DeepFM requires scikit-rec[torch] and only supports classification — only suggest
+  it when there are rich interaction features and the user has torch installed.
 - Timestamps present → sequential is an option; always consider it alongside ranking.
 - No timestamps → skip sequential; use ranking.
 - Target type: binary (clicks) → ml_task="classification"; continuous (ratings, dwell
   time) → "regression". profile_data reports target_type to help pick.
+  Note: deepfm only supports classification.
 - Extremely sparse (<0.01% density) → start with matrix_factorization or XGBoost, not
   deep models.
 - Causal / uplift needed → uplift recommender; require `control_item_id`.

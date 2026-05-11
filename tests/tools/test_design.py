@@ -169,7 +169,7 @@ def test_step3_drops_embedding_below_5k_rows(long_with_timestamp_bundle):
 # ---------------------------------------------------------------------------
 
 
-def test_step4_tabular_returns_xgboost_only(long_with_timestamp_bundle):
+def test_step4_tabular_returns_tabular_model_options(long_with_timestamp_bundle):
     session = long_with_timestamp_bundle
     result = TOOL_LIST_COMPATIBLE_OPTIONS.fn(
         bundle_id="b",
@@ -181,7 +181,9 @@ def test_step4_tabular_returns_xgboost_only(long_with_timestamp_bundle):
         session=session,
     )
     values = [opt["value"] for opt in result["data"]["options"]]
-    assert values == ["xgboost"]
+    assert "xgboost" in values
+    assert "lightgbm" in values
+    assert "deepfm" not in values  # torch absent in test env → filtered out
 
 
 def test_step4_sequential_filters_by_target_type(long_with_timestamp_bundle):
@@ -305,6 +307,42 @@ def test_apply_overrides_merges_into_embedding_params_bucket():
     out = apply_overrides(cfg, {"n_factors": 64, "epochs": 20})
     assert out["estimator_config"]["embedding"]["params"]["n_factors"] == 64
     assert out["estimator_config"]["embedding"]["params"]["epochs"] == 20
+
+
+def test_apply_overrides_merges_into_lightgbm_bucket():
+    """Regression: apply_overrides previously hardcoded 'xgboost' as the tabular
+    bucket. With a lightgbm config, overrides landed in recommender_params instead."""
+    cfg = {
+        "recommender_type": "ranking",
+        "scorer_type": "universal",
+        "estimator_config": {
+            "ml_task": "classification",
+            "lightgbm": {"n_estimators": 100, "num_leaves": 31, "learning_rate": 0.1},
+        },
+        "recommender_params": {},
+    }
+    out = apply_overrides(cfg, {"n_estimators": 500, "num_leaves": 127})
+    assert out["estimator_config"]["lightgbm"]["n_estimators"] == 500
+    assert out["estimator_config"]["lightgbm"]["num_leaves"] == 127
+    assert out["estimator_config"]["lightgbm"]["learning_rate"] == 0.1  # unchanged
+    assert out["recommender_params"] == {}  # nothing leaked into recommender_params
+    assert cfg["estimator_config"]["lightgbm"]["n_estimators"] == 100  # original untouched
+
+
+def test_apply_overrides_unknown_key_lands_in_lightgbm_fallback_bucket():
+    """Unknown override keys should fall into the lightgbm bucket, not recommender_params."""
+    cfg = {
+        "recommender_type": "ranking",
+        "scorer_type": "universal",
+        "estimator_config": {
+            "ml_task": "classification",
+            "lightgbm": {"n_estimators": 100},
+        },
+        "recommender_params": {},
+    }
+    out = apply_overrides(cfg, {"min_child_samples": 20})
+    assert out["estimator_config"]["lightgbm"]["min_child_samples"] == 20
+    assert out["recommender_params"] == {}
 
 
 def test_apply_overrides_unknown_key_lands_in_fallback_bucket():

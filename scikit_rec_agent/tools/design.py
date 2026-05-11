@@ -111,7 +111,22 @@ def _options_for_estimator_type(scorer_type: str, profile: dict[str, Any]) -> tu
 
 def _options_for_model_type(estimator_type: str, profile: dict[str, Any]) -> tuple[list[str], list[str]]:
     if estimator_type == "tabular":
-        return ["xgboost"], []
+        from skrec.orchestrator.factory import capability_matrix as _cm
+        cm = _cm()
+        all_tabular = list(cm.get("tabular_model_types", ("xgboost",)))
+        kept, dropped_pairs = [], []
+        for m in all_tabular:
+            if m == "deepfm":
+                if profile.get("target_type") == "continuous":
+                    dropped_pairs.append((m, "deepfm only supports classification; data has continuous targets"))
+                    continue
+                try:
+                    import torch  # noqa: F401
+                except ImportError:
+                    dropped_pairs.append((m, "deepfm requires scikit-rec[torch] — torch not installed"))
+                    continue
+            kept.append(m)
+        return kept, [f"{v}: {reason}" for v, reason in dropped_pairs]
     if estimator_type == "embedding":
         # All five embedding model_types are reachable via the factory; data-size
         # gate already applied at the estimator_type step. Two-Tower needs features.
@@ -159,9 +174,18 @@ def _assemble_method(choices: dict[str, str], profile: dict[str, Any]) -> dict[s
 
     if estimator_type == "tabular":
         ml_task = "regression" if profile.get("target_type") == "continuous" else "classification"
+        if model_type == "lightgbm":
+            model_key = "lightgbm"
+            model_defaults: dict[str, Any] = {"n_estimators": 50, "max_depth": -1, "learning_rate": 0.1, "num_leaves": 31}
+        elif model_type == "deepfm":
+            model_key = "deepfm"
+            model_defaults = {"embedding_dim": 16, "hidden_dim1": 64, "hidden_dim2": 32, "epochs": 5, "batch_size": 256, "lr": 0.001}
+        else:
+            model_key = "xgboost"
+            model_defaults = {"n_estimators": 50, "max_depth": 4, "learning_rate": 0.1}
         method["estimator_config"] = {
             "ml_task": ml_task,
-            "xgboost": {"n_estimators": 50, "max_depth": 4, "learning_rate": 0.1},
+            model_key: model_defaults,
         }
     elif estimator_type == "embedding":
         method["estimator_config"] = {
@@ -248,10 +272,10 @@ def suggest_search_space(method: dict[str, Any], profile: dict[str, Any]) -> dic
     refinement of "train with defaults". Pass the result straight into
     ``run_hpo``'s ``search_space`` argument.
 
-    Per-family coverage: tabular (XGBoost), embedding (MF / NCF / Two-Tower /
-    DCN / NFM), sequential (SASRec / HRNN). Estimator families NOT yet routed
-    through scikit-rec's factory return ``{}`` (caller should treat that as
-    "no automatic search space — write your own").
+    Per-family coverage: tabular (XGBoost, LightGBM), embedding (MF / NCF /
+    Two-Tower / DCN / NFM), sequential (SASRec / HRNN). DeepFM and estimator
+    families NOT yet routed through scikit-rec's factory return ``{}`` (caller
+    should treat that as "no automatic search space — write your own").
     """
     estimator_config = method.get("estimator_config", {})
     space: dict[str, Any] = {}
@@ -277,6 +301,38 @@ def suggest_search_space(method: dict[str, Any], profile: dict[str, Any]) -> dic
                     "high": 0.3,
                     "log_scale": True,
                     "rationale": "log-uniform LR; lower LR pairs with more trees",
+                },
+            }
+        )
+        return space
+
+    if "lightgbm" in estimator_config:
+        space.update(
+            {
+                "n_estimators": {
+                    "type": "int",
+                    "low": 50,
+                    "high": 1000,
+                    "rationale": "LightGBM trains shallower trees quickly; more trees are affordable without proportional slowdown",
+                },
+                "num_leaves": {
+                    "type": "int",
+                    "low": 15,
+                    "high": 255,
+                    "rationale": "controls model complexity; keep < 2^max_depth to avoid overfitting",
+                },
+                "learning_rate": {
+                    "type": "float",
+                    "low": 0.01,
+                    "high": 0.3,
+                    "log_scale": True,
+                    "rationale": "log-uniform LR; lower LR pairs with more trees",
+                },
+                "min_child_samples": {
+                    "type": "int",
+                    "low": 5,
+                    "high": 100,
+                    "rationale": "minimum leaf population; higher values regularise on small data",
                 },
             }
         )
@@ -451,13 +507,13 @@ def apply_overrides(assembled_config: dict[str, Any], overrides: dict[str, Any])
     `assembled_config` dict. Returns a deep copy — original is not mutated.
 
     Each override key is the bare hyperparameter name (e.g. ``n_estimators``,
-    ``hidden_units``, ``learning_rate``). The function walks the four known
+    ``hidden_units``, ``learning_rate``). The function walks the known
     locations a hyperparameter can live in inside a RecommenderConfig:
 
-    - ``estimator_config.xgboost.<name>``                     (tabular XGBoost)
-    - ``estimator_config.embedding.params.<name>``            (embedding family)
-    - ``estimator_config.sequential.params.<name>``           (sequential family)
-    - ``recommender_params.<name>``                           (e.g. max_len)
+    - ``estimator_config.{xgboost|lightgbm|deepfm}.<name>``   (tabular family)
+    - ``estimator_config.embedding.params.<name>``             (embedding family)
+    - ``estimator_config.sequential.params.<name>``            (sequential family)
+    - ``recommender_params.<name>``                            (e.g. max_len)
 
     The first location that already contains the key wins; if the key isn't
     found anywhere, it lands in the most likely params bucket for the
@@ -468,13 +524,16 @@ def apply_overrides(assembled_config: dict[str, Any], overrides: dict[str, Any])
     estimator_config = new_config.setdefault("estimator_config", {})
     recommender_params = new_config.setdefault("recommender_params", {})
 
-    xgb = estimator_config.get("xgboost")
+    tabular_params = next(
+        (estimator_config[k] for k in ("xgboost", "lightgbm", "deepfm") if k in estimator_config),
+        None,
+    )
     embedding_params = estimator_config.get("embedding", {}).get("params")
     sequential_params = estimator_config.get("sequential", {}).get("params")
 
     fallback_bucket: dict[str, Any] | None
-    if xgb is not None:
-        fallback_bucket = xgb
+    if tabular_params is not None:
+        fallback_bucket = tabular_params
     elif embedding_params is not None:
         fallback_bucket = embedding_params
     elif sequential_params is not None:
@@ -496,7 +555,7 @@ def apply_overrides(assembled_config: dict[str, Any], overrides: dict[str, Any])
     for key, value in overrides.items():
         if key in mirror_keys:
             updated_any = False
-            for bucket in (xgb, embedding_params, sequential_params, recommender_params):
+            for bucket in (tabular_params, embedding_params, sequential_params, recommender_params):
                 if bucket is not None and key in bucket:
                     bucket[key] = value
                     updated_any = True
@@ -504,7 +563,7 @@ def apply_overrides(assembled_config: dict[str, Any], overrides: dict[str, Any])
                 fallback_bucket[key] = value
             continue
 
-        for bucket in (xgb, embedding_params, sequential_params, recommender_params):
+        for bucket in (tabular_params, embedding_params, sequential_params, recommender_params):
             if bucket is not None and key in bucket:
                 bucket[key] = value
                 break
@@ -612,7 +671,9 @@ def _terminal_payload(choices: dict[str, str], profile: dict[str, Any], resize_f
 
     estimator_type = choices["estimator_type"]
     if estimator_type == "tabular":
-        params = config["estimator_config"]["xgboost"]
+        ec = config["estimator_config"]
+        tabular_key = next((k for k in ("xgboost", "lightgbm", "deepfm") if k in ec), None)
+        params = ec[tabular_key] if tabular_key else {}
     elif estimator_type == "embedding":
         params = config["estimator_config"]["embedding"]["params"]
     elif estimator_type == "sequential":

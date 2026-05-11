@@ -401,6 +401,8 @@ _SCALE_TIERS = [
         "n_factors": 8,
         "xgb_n_estimators": 30,
         "xgb_max_depth": 3,
+        "lgbm_n_estimators": 50,
+        "lgbm_num_leaves": 15,
     },
     {
         "max_rows": 100_000,
@@ -410,6 +412,8 @@ _SCALE_TIERS = [
         "n_factors": 16,
         "xgb_n_estimators": 100,
         "xgb_max_depth": 5,
+        "lgbm_n_estimators": 100,
+        "lgbm_num_leaves": 31,
     },
     {
         "max_rows": 1_000_000,
@@ -419,6 +423,8 @@ _SCALE_TIERS = [
         "n_factors": 32,
         "xgb_n_estimators": 200,
         "xgb_max_depth": 6,
+        "lgbm_n_estimators": 300,
+        "lgbm_num_leaves": 63,
     },
     {
         "max_rows": float("inf"),
@@ -428,6 +434,8 @@ _SCALE_TIERS = [
         "n_factors": 64,
         "xgb_n_estimators": 300,
         "xgb_max_depth": 8,
+        "lgbm_n_estimators": 500,
+        "lgbm_num_leaves": 127,
     },
 ]
 
@@ -562,6 +570,7 @@ def _resize_for_data_scale(method: dict[str, Any], profile: dict[str, Any]) -> d
     Rules per estimator family:
     - **tabular xgboost** : tier sets n_estimators, max_depth, ml_task
       (classification → regression for continuous targets).
+    - **tabular lightgbm** : tier sets n_estimators, num_leaves, ml_task.
     - **embedding (matrix_factorization)** : tier sets n_factors, epochs.
     - **embedding (ncf / dcn / nfm)** : tier sets embedding_dim, epochs.
     - **embedding (two_tower)** : tier sets user/item/final_embedding_dim,
@@ -583,6 +592,12 @@ def _resize_for_data_scale(method: dict[str, Any], profile: dict[str, Any]) -> d
             estimator_config["ml_task"] = "regression"
         estimator_config["xgboost"]["n_estimators"] = tier["xgb_n_estimators"]
         estimator_config["xgboost"]["max_depth"] = tier["xgb_max_depth"]
+
+    if "lightgbm" in estimator_config:
+        if target_type == "continuous":
+            estimator_config["ml_task"] = "regression"
+        estimator_config["lightgbm"]["n_estimators"] = tier["lgbm_n_estimators"]
+        estimator_config["lightgbm"]["num_leaves"] = tier["lgbm_num_leaves"]
 
     embedding = estimator_config.get("embedding", {})
     if embedding:

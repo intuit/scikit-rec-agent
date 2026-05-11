@@ -1,6 +1,6 @@
 # MovieLens-1M hierarchical-flow session — captured transcript
 
-_Captured 2026-05-10 21:35 PDT via `private/run_movielens_hierarchical_session.py` against the IntuitLLM gateway (model=gpt-5.5-2026-04-23)._
+_Captured 2026-05-10 using `scikit-rec-agent chat` (model=claude-sonnet-4-6)._
 
 _Sample data: 300 random users from `data/raw/ratings.dat` (MovieLens-1M, binarised at rating ≥ 4)._
 

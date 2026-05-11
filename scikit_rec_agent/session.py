@@ -8,7 +8,7 @@ handle.
 
 from __future__ import annotations
 
-import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -90,5 +90,5 @@ class Session:
 
 
 def new_model_id(recommender_type: str) -> str:
-    """Generate a deterministic, collision-resistant model_id."""
-    return f"{recommender_type}_{int(time.time() * 1000)}"
+    """Generate a unique, readable model_id."""
+    return f"{recommender_type}_{uuid.uuid4().hex[:8]}"

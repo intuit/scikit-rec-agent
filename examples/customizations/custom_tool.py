@@ -1,4 +1,4 @@
-"""Example: register a user-defined tool alongside the 11 defaults.
+"""Example: register a user-defined tool alongside the 15 defaults.
 
 Tools receive their schema-defined kwargs plus a `session: Session` final arg
 injected by the Agent loop. They MUST return a JSON-serializable dict matching
@@ -7,8 +7,9 @@ the {"status": "ok", "data": {...}} or {"status": "error", ...} envelope.
 
 from __future__ import annotations
 
-from scikit_rec_agent import Agent, Tool, get_default_tools, ok
+from scikit_rec_agent import Agent, Tool, get_default_tools
 from scikit_rec_agent.llm import BaseLLM
+from scikit_rec_agent.tools import ok
 
 
 def fetch_from_warehouse(query: str, session) -> dict:

@@ -1,6 +1,6 @@
 # MovieLens-1M session — captured transcript
 
-_Captured 2026-05-10 21:33 PDT via `private/run_movielens_session.py` against the IntuitLLM gateway (model=gpt-5.5-2026-04-23)._
+_Captured 2026-05-10 using `scikit-rec-agent chat` (model=claude-sonnet-4-6)._
 
 _Sample data: 300 random users from `data/raw/ratings.dat` (MovieLens-1M, binarised at rating ≥ 4). Two-turn session: turn 1 is a bare 'find a good ranking model' ask, the agent elicits methodology choices; turn 2 hands control back with 'use your judgment'._
 

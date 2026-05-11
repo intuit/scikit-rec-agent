@@ -13,10 +13,10 @@ This document is the authoritative spec for the implementation. It reflects the 
 | Distribution | **Single pip package** (`scikit-rec-agent`) | Installable library with CLI entry point. Examples live in `examples/`, no separate cookbook repo. |
 | LLM provider | **Bring-your-own** via `BaseLLM` protocol | Users pass any LLM that implements `chat()` + `chat_stream()`. Ship Anthropic + OpenAI adapters at launch. |
 | System prompt | **Swappable at `Agent()` construction** | Default prompt exported; users pass `system_prompt=...` to override or extend. |
-| Tool registry | **Pluggable at `Agent()` construction** | 11 default tools ship with the library; users extend or replace via `tools=...`. |
+| Tool registry | **Pluggable at `Agent()` construction** | 15 default tools ship with the library; users extend or replace via `tools=...`. |
 | Interface | **CLI** for v1 | `scikit-rec-agent chat`. Jupyter/web layered on top of `Agent` later. |
 | Model registry | **Local filesystem** | `~/.scikit-rec/registry/` — JSON metadata + pickle. |
-| Tool scope | **11 tools, everything in v1** | No v1.1 tier. If it's worth shipping, it ships now. |
+| Tool scope | **15 tools, everything in v1** | No v1.1 tier. If it's worth shipping, it ships now. |
 | Recommender scope | **Full scikit-rec capability matrix** | All 6 recommenders × 6 scorers × 3 estimator planes. Driven end-to-end via `create_recommender_pipeline`. |
 | `suggest_pipelines` | **In-prompt reasoning, not a tool** | The LLM emits candidate `RecommenderConfig` dicts as text; `train_model` validates via the factory. |
 | Config validation | **Delegated to scikit-rec factory** | Agent does not re-implement enum checks. Bad configs fail at `train_model` with the factory's error message surfaced to the LLM. |
@@ -37,7 +37,7 @@ Agent Loop (BaseLLM protocol + tool dispatch + streaming)
   |                          +---- UserCustomAdapter (anything)
   |
   v
-Tools Layer (10 structured tool-use functions)
+Tools Layer (15 structured tool-use functions)
   |
   v
 scikit-rec
@@ -757,8 +757,13 @@ scikit-rec-agent/
 │   ├── tools/
 │   │   ├── __init__.py             # get_default_tools(); Tool dataclass
 │   │   ├── profiling.py            # profile_data, validate_data
+│   │   ├── transform.py            # transform_data
 │   │   ├── datasets.py             # create_datasets (incl. auto-schema generation)
+│   │   ├── splitting.py            # split_data
+│   │   ├── design.py               # list_compatible_options
 │   │   ├── training.py             # train_model
+│   │   ├── diagnose.py             # diagnose_training_failure
+│   │   ├── sweep.py                # sweep_methods
 │   │   ├── evaluation.py           # evaluate_model, compare_models
 │   │   ├── hpo.py                  # run_hpo
 │   │   └── registry.py             # save_model, list_models, load_model
@@ -819,13 +824,3 @@ pip install scikit-rec-agent                   # bring your own LLM
 
 All ML dependencies come transitively through `scikit-rec`.
 
----
-
-## Build Plan
-
-1. **Day 1 — Skeleton**: `pyproject.toml`, `llm/{base,anthropic,openai}.py`, `session.py`, `agent.py` loop, mocked-LLM smoke test (one scripted `train_model` call end-to-end).
-2. **Days 2–4 — Tools**: all 11 tools against `create_recommender_pipeline`, `skrec.split`, and `HyperparameterOptimizer`. Use `skrec.examples.datasets.sample_*` for fixtures.
-3. **Days 5–6 — System prompt + CLI**: build the capability matrix from factory enums at import time (derive, don't hardcode); CLI entry with streaming; single end-to-end transcript example.
-4. **Day 7 — Tests + polish**: per-tool tests, adapter tests with mocked API, end-to-end scripted-LLM integration test, README.
-
-Out of scope for v1: Jupyter widget, web UI, MLflow registry backend, non-XGBoost tabular estimators (LightGBM / logreg / sklearn wrappers) via factory — they work today if manually constructed but aren't in the factory's enum yet, which is a scikit-rec follow-up, not an agent concern.

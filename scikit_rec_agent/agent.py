@@ -193,7 +193,10 @@ class Agent:
                         stream.write(f"\n[warning] {event.text}\n")
                         stream.flush()
                     elif event.type == "done":
-                        stream.write("\n")
+                        if event.stop_reason == "max_iterations":
+                            stream.write("\n[agent reached the tool-call limit — type a follow-up or /exit]\n")
+                        else:
+                            stream.write("\n")
                         stream.flush()
         except (EOFError, KeyboardInterrupt):
             stream.write("\n")

@@ -183,7 +183,7 @@ def test_step4_tabular_returns_tabular_model_options(long_with_timestamp_bundle)
     values = [opt["value"] for opt in result["data"]["options"]]
     assert "xgboost" in values
     assert "lightgbm" in values
-    assert "deepfm" not in values  # torch absent in test env → filtered out
+    # deepfm presence depends on whether torch is installed in the test env — don't assert either way
 
 
 def test_step4_sequential_filters_by_target_type(long_with_timestamp_bundle):

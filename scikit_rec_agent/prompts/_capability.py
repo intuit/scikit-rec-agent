@@ -24,6 +24,7 @@ def _init_eval_metric_types() -> tuple[tuple[str, ...], tuple[str, ...]]:
         return cm["evaluator_types"], cm["metric_types"]
     from skrec.evaluator.datatypes import RecommenderEvaluatorType
     from skrec.metrics.datatypes import RecommenderMetricType
+
     return (
         tuple(e.value for e in RecommenderEvaluatorType),
         tuple(m.value for m in RecommenderMetricType),

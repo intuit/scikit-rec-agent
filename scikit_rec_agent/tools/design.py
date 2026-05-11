@@ -112,6 +112,7 @@ def _options_for_estimator_type(scorer_type: str, profile: dict[str, Any]) -> tu
 def _options_for_model_type(estimator_type: str, profile: dict[str, Any]) -> tuple[list[str], list[str]]:
     if estimator_type == "tabular":
         from skrec.orchestrator.factory import capability_matrix as _cm
+
         cm = _cm()
         all_tabular = list(cm.get("tabular_model_types", ("xgboost",)))
         kept, dropped_pairs = [], []
@@ -176,10 +177,22 @@ def _assemble_method(choices: dict[str, str], profile: dict[str, Any]) -> dict[s
         ml_task = "regression" if profile.get("target_type") == "continuous" else "classification"
         if model_type == "lightgbm":
             model_key = "lightgbm"
-            model_defaults: dict[str, Any] = {"n_estimators": 50, "max_depth": -1, "learning_rate": 0.1, "num_leaves": 31}
+            model_defaults: dict[str, Any] = {
+                "n_estimators": 50,
+                "max_depth": -1,
+                "learning_rate": 0.1,
+                "num_leaves": 31,
+            }
         elif model_type == "deepfm":
             model_key = "deepfm"
-            model_defaults = {"embedding_dim": 16, "hidden_dim1": 64, "hidden_dim2": 32, "epochs": 5, "batch_size": 256, "lr": 0.001}
+            model_defaults = {
+                "embedding_dim": 16,
+                "hidden_dim1": 64,
+                "hidden_dim2": 32,
+                "epochs": 5,
+                "batch_size": 256,
+                "lr": 0.001,
+            }
         else:
             model_key = "xgboost"
             model_defaults = {"n_estimators": 50, "max_depth": 4, "learning_rate": 0.1}
@@ -313,7 +326,7 @@ def suggest_search_space(method: dict[str, Any], profile: dict[str, Any]) -> dic
                     "type": "int",
                     "low": 50,
                     "high": 1000,
-                    "rationale": "LightGBM trains shallower trees quickly; more trees are affordable without proportional slowdown",
+                    "rationale": "shallower trees train cheaply; more rounds improve fit without proportional slowdown",
                 },
                 "num_leaves": {
                     "type": "int",

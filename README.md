@@ -1,9 +1,6 @@
 # scikit-rec-agent
 
-[![CI](https://github.com/intuit/scikit-rec-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/intuit/scikit-rec-agent/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/scikit-rec-agent)](https://pypi.org/project/scikit-rec-agent/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Python](https://img.shields.io/pypi/pyversions/scikit-rec-agent)](https://pypi.org/project/scikit-rec-agent/)
 
 Conversational AI agent that uses [scikit-rec](https://github.com/intuit/scikit-rec) as its tool belt. The agent reasons about the user's data and goals, then calls scikit-rec APIs via structured tool use to build, evaluate, and compare recommendation systems.
 
